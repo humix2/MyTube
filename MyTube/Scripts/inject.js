@@ -125,6 +125,35 @@
     ytd-watch-flexy:not([mytube-split]) #mytube-comments-panel { display: none; }
     ytd-watch-flexy[mytube-split][data-mytube-tab="comments"] #secondary #related { display: none !important; }
     ytd-watch-flexy[mytube-split][data-mytube-tab="related"] #mytube-comments-panel { display: none; }
+
+    /* ライブ配信のチャットを動画の上に流す（操作バーより下、動画より上） */
+    #mytube-chat-overlay {
+      position: absolute; inset: 0; z-index: 35;
+      overflow: hidden; pointer-events: none; contain: strict;
+    }
+    #mytube-chat-overlay .c {
+      position: absolute; left: 0; top: 0; white-space: nowrap; will-change: transform;
+      font-weight: 700; line-height: 1.2; font-family: "Yu Gothic UI", Meiryo, Roboto, sans-serif;
+      color: #fff; opacity: .9;
+      text-shadow: 0 0 3px #000, 1px 1px 1px #000, -1px -1px 1px #000, 1px -1px 1px #000, -1px 1px 1px #000;
+    }
+    #mytube-chat-overlay .c img { height: 1.1em; width: auto; vertical-align: -.2em; }
+    #mytube-chat-overlay .paid { color: #ffd54f; }
+    #mytube-chat-overlay .member { color: #7ee787; }
+    /* 自前のチャット欄（チャット欄を閉じているとき用）。読み込みを止められないよう、消さずに画面の外に置く */
+    #mytube-chat-source {
+      position: fixed; left: -10000px; top: 0; width: 400px; height: 600px;
+      border: 0; opacity: 0; pointer-events: none;
+    }
+    .mytube-chat-btn {
+      display: inline-flex !important; align-items: center; justify-content: center;
+      padding: 0 !important; vertical-align: top;
+    }
+    .mytube-chat-btn[hidden] { display: none !important; }
+    .mytube-chat-btn svg { flex: none; }
+    .mytube-chat-btn .slash { display: none; }
+    .mytube-chat-btn[aria-pressed="false"] .slash { display: inline; }
+    .mytube-chat-btn[aria-pressed="false"] svg { opacity: .7; }
   `;
 
   function videoIdFromHref(href) {
@@ -209,6 +238,7 @@
     applyGrouping();
     applyWatchLayout();
     applyHistoryFilter();
+    attachChat();
   }
 
   // ---- 履歴ページ：最初は「動画」の絞り込みを選んでおく（ショートを出さない） ----
@@ -457,6 +487,303 @@
     bar.replaceChildren(...buttons);
   }
 
+  // ---- ライブ配信のチャットを動画の上に流す ----
+  // 右側のチャット欄（同じサイトの iframe）に発言が増えるのを見張って、プレイヤーの上に流す。
+  // アーカイブのチャットも YouTube 側が再生位置に合わせて出してくれるので、そのまま流せばよい。
+
+  const CHAT_DURATION = 5000; // 右端から左端まで流れる時間（ミリ秒）
+  const CHAT_LANES = 14;      // 縦に並ぶ行の数
+  const CHAT_MAX = 80;        // 同時に流す上限
+  const CHAT_BURST = 15;      // 一度にこれより多く増えたら（読み込み直後・シーク直後）流さない
+  const CHAT_TYPES = {
+    'YT-LIVE-CHAT-TEXT-MESSAGE-RENDERER': '',
+    'YT-LIVE-CHAT-PAID-MESSAGE-RENDERER': 'paid',
+    'YT-LIVE-CHAT-PAID-STICKER-RENDERER': 'paid',
+    'YT-LIVE-CHAT-MEMBERSHIP-ITEM-RENDERER': 'member',
+  };
+
+  let chatOn = true;
+  let chatItems = null;    // 見張っているチャット欄の発言リスト
+  let chatObserver = null;
+  let chatIgnoreUntil = 0;
+  let chatVideo = null;
+  const chatLanes = new Array(CHAT_LANES).fill(null); // 行ごとに最後に流したコメント
+  const chatAnims = new Set();
+
+  // チャット欄を閉じても流せるように、そのときは画面の外に自前のチャット欄を読み込んでそこから拾う
+  let chatSrc = null;   // { id, src } 動画ごとに、YouTube のチャット欄が開いていたページ
+  let ownFrame = null;  // 自前のチャット欄
+
+  function currentVideoId() {
+    return location.pathname === '/watch' ? new URLSearchParams(location.search).get('v') : null;
+  }
+
+  function isShown(frame) {
+    if (frame.closest('ytd-live-chat-frame[collapsed]')) return false;
+    const r = frame.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  // 一度もチャット欄を開いていなくても、配信中ならチャットのページは動画IDだけで開ける
+  function liveChatSrc(id) {
+    try {
+      const player = document.querySelector('#movie_player');
+      const data = player && player.getVideoData && player.getVideoData();
+      if (data && data.isLive) return `${location.origin}/live_chat?v=${encodeURIComponent(id)}`;
+    } catch { /* 分からなければなし */ }
+    return null;
+  }
+
+  function ensureOwnFrame(src) {
+    if (ownFrame && ownFrame.isConnected && ownFrame.dataset.src === src) return ownFrame;
+    removeOwnFrame();
+    if (!document.body) return null;
+    ownFrame = document.createElement('iframe');
+    ownFrame.id = 'mytube-chat-source';
+    ownFrame.dataset.src = src;
+    ownFrame.src = src;
+    document.body.appendChild(ownFrame);
+    return ownFrame;
+  }
+
+  function removeOwnFrame() {
+    if (ownFrame) ownFrame.remove();
+    ownFrame = null;
+  }
+
+  function attachChat() {
+    const id = currentVideoId();
+    const ytFrame = id ? document.querySelector('ytd-live-chat-frame iframe') : null;
+    if (ytFrame && /\/live_chat(_replay)?\?/.test(ytFrame.src) && !(chatSrc && chatSrc.id === id && chatSrc.src === ytFrame.src)) {
+      chatSrc = { id, src: ytFrame.src };
+    }
+    const src = id ? (chatSrc && chatSrc.id === id ? chatSrc.src : liveChatSrc(id)) : null;
+
+    let frame = null;
+    if (ytFrame && isShown(ytFrame)) {
+      frame = ytFrame;
+      removeOwnFrame();
+    } else if (chatOn && src) {
+      frame = ensureOwnFrame(src);
+    } else {
+      removeOwnFrame();
+    }
+
+    let items = null;
+    try {
+      const doc = frame && frame.contentDocument;
+      items = doc && doc.querySelector('yt-live-chat-item-list-renderer #items');
+    } catch { /* 読めないときは何もしない */ }
+
+    renderChatButton(!!(ytFrame || src));
+    watchVideo();
+
+    if (items === chatItems) return;
+    if (chatObserver) chatObserver.disconnect();
+    chatObserver = null;
+    chatItems = items;
+    clearChat();
+    if (!items) return;
+    chatIgnoreUntil = performance.now() + 1500;
+    chatObserver = new MutationObserver(onChatMutations);
+    chatObserver.observe(items, { childList: true });
+  }
+
+  function onChatMutations(records) {
+    if (!chatOn) return;
+    const nodes = [];
+    for (const r of records) {
+      for (const n of r.addedNodes) {
+        if (n.nodeType === 1 && n.tagName in CHAT_TYPES) nodes.push(n);
+      }
+    }
+    if (!nodes.length || nodes.length > CHAT_BURST || performance.now() < chatIgnoreUntil) return;
+    if (!chatVideo || chatVideo.paused) return;
+    // 追加された直後は中身がまだ入っていないことがあるので少し待つ
+    setTimeout(() => nodes.forEach(spawnComment), 50);
+  }
+
+  // 一時停止・シークに合わせる
+  function watchVideo() {
+    const video = document.querySelector('#movie_player video');
+    if (!video || video === chatVideo) return;
+    chatVideo = video;
+    video.addEventListener('pause', () => chatAnims.forEach((a) => a.pause()));
+    video.addEventListener('play', () => chatAnims.forEach((a) => a.play()));
+    video.addEventListener('seeking', () => {
+      clearChat();
+      chatIgnoreUntil = performance.now() + 1500;
+    });
+    // アーカイブのチャットは再生位置を教えてもらって進むので、自前のチャット欄には自分で伝える
+    // （YouTube のチャット欄が受け取っているのと同じ形のメッセージ）
+    video.addEventListener('timeupdate', () => {
+      if (!ownFrame || !ownFrame.contentWindow || !ownFrame.dataset.src.includes('/live_chat_replay')) return;
+      ownFrame.contentWindow.postMessage({ 'yt-player-video-progress': video.currentTime }, location.origin);
+    });
+  }
+
+  function clearChat() {
+    for (const a of [...chatAnims]) a.cancel();
+    chatLanes.fill(null);
+  }
+
+  function appendMessage(el, msg) {
+    for (const n of msg.childNodes) {
+      if (n.nodeType === 3) {
+        el.append(n.textContent);
+      } else if (n.nodeName === 'IMG') {
+        // 絵文字・スタンプは画像のまま出す
+        if (/^https:/.test(n.src)) {
+          const img = document.createElement('img');
+          img.src = n.src;
+          img.alt = n.alt || '';
+          el.append(img);
+        } else if (n.alt) {
+          el.append(n.alt);
+        }
+      } else if (n.nodeType === 1) {
+        appendMessage(el, n); // リンクなど
+      }
+    }
+  }
+
+  function buildComment(node) {
+    const kind = CHAT_TYPES[node.tagName];
+    const el = document.createElement('div');
+    el.className = kind ? `c ${kind}` : 'c';
+    const amount = node.querySelector('#purchase-amount, #purchase-amount-chip');
+    if (amount && amount.textContent.trim()) el.append(amount.textContent.trim() + ' ');
+    const msg = node.querySelector('#message');
+    if (msg) appendMessage(el, msg);
+    return el.textContent.trim() || el.querySelector('img') ? el : null;
+  }
+
+  // 前のコメントに重ならない行を探す。見つからなければ -1
+  function pickLane(width, W) {
+    const speed = (W + width) / CHAT_DURATION;
+    for (let i = 0; i < CHAT_LANES; i++) {
+      const prev = chatLanes[i];
+      if (!prev || !chatAnims.has(prev.anim)) return i;
+      const t = Number(prev.anim.currentTime) || 0;
+      // 前のコメントの末尾がまだ右端から出きっていない
+      if (W - prev.speed * t + prev.width > W - 16) continue;
+      // 後のほうが速くても、前の末尾が左端に着くまでに追いつかない
+      if (W / speed >= CHAT_DURATION - t) return i;
+    }
+    return -1;
+  }
+
+  function spawnComment(node) {
+    if (!chatOn || chatAnims.size >= CHAT_MAX || !node.isConnected) return;
+    const player = document.querySelector('#movie_player');
+    if (!player) return;
+    const el = buildComment(node);
+    if (!el) return;
+
+    let overlay = player.querySelector(':scope > #mytube-chat-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'mytube-chat-overlay';
+      player.appendChild(overlay);
+    }
+    const W = overlay.clientWidth;
+    const H = overlay.clientHeight;
+    if (!W || !H) return;
+
+    const laneH = H / CHAT_LANES;
+    el.style.fontSize = `${Math.max(14, laneH / 1.3)}px`;
+    el.style.visibility = 'hidden';
+    overlay.appendChild(el);
+    const width = el.offsetWidth;
+    const lane = pickLane(width, W);
+    if (lane < 0) { el.remove(); return; }
+
+    el.style.top = `${lane * laneH}px`;
+    el.style.visibility = '';
+    const anim = el.animate(
+      [{ transform: `translateX(${W}px)` }, { transform: `translateX(${-width}px)` }],
+      { duration: CHAT_DURATION, easing: 'linear' });
+    chatLanes[lane] = { anim, width, speed: (W + width) / CHAT_DURATION };
+    chatAnims.add(anim);
+    anim.onfinish = anim.oncancel = () => { chatAnims.delete(anim); el.remove(); };
+  }
+
+  // 操作バーのオン・オフボタン（チャットがある動画だけ出す）
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svgPath(d, cls) {
+    const p = document.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', d);
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', '#fff');
+    p.setAttribute('stroke-width', '1.8');
+    p.setAttribute('stroke-linecap', 'round');
+    p.setAttribute('stroke-linejoin', 'round');
+    if (cls) p.setAttribute('class', cls);
+    return p;
+  }
+
+  // 吹き出しの絵は 24 の枠のうち幅 17 を占めるので、歯車の絵と同じ幅になる svg の大きさを返す
+  function chatIconSize(ref) {
+    try {
+      const rect = ref.getBoundingClientRect();
+      const box = ref.viewBox && ref.viewBox.baseVal;
+      const scale = box && box.width ? rect.width / box.width : 1;
+      const drawn = ref.getBBox().width * scale;
+      if (drawn > 0) return Math.round(Math.min(40, Math.max(14, drawn * 24 / 17)));
+    } catch { /* 測れなければ既定の大きさ */ }
+    return 24;
+  }
+
+  function renderChatButton(show) {
+    const controls = document.querySelector('#movie_player .ytp-right-controls');
+    if (!controls) return;
+    let btn = controls.querySelector('.mytube-chat-btn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ytp-button mytube-chat-btn';
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 24 24');
+      svg.append(
+        svgPath('M5 5h14a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 16h-7l-4 3.5V16H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 5z'),
+        svgPath('M8 9h8M8 12.5h5'),
+        svgPath('M4 20L20 4', 'slash'));
+      btn.append(svg);
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setChatOn(!chatOn);
+        post({ type: 'chatComments', value: chatOn });
+      });
+    }
+    // 設定（歯車）ボタンのすぐ左に置く
+    const settings = controls.querySelector('.ytp-settings-button');
+    if (settings) {
+      if (settings.previousElementSibling !== btn) settings.before(btn);
+    } else if (!btn.isConnected) {
+      controls.prepend(btn);
+    }
+    // アイコンの大きさは歯車の絵の大きさに合わせる（全画面などで変わる）。
+    // 歯車の svg は余白込みなので、svg の幅ではなく中の絵の幅を測る
+    const size = `${chatIconSize(settings && settings.querySelector('svg'))}px`;
+    const svg = btn.querySelector('svg');
+    if (svg.style.width !== size) {
+      svg.style.width = size;
+      svg.style.height = size;
+    }
+    if (btn.hidden !== !show) btn.hidden = !show;
+    const pressed = String(chatOn);
+    if (btn.getAttribute('aria-pressed') !== pressed) {
+      btn.setAttribute('aria-pressed', pressed);
+      btn.title = chatOn ? 'コメントを非表示' : 'コメントを表示';
+    }
+  }
+
+  function setChatOn(on) {
+    chatOn = !!on;
+    if (!chatOn) clearChat();
+    attachChat();
+  }
+
   let timer = 0;
   function schedule() {
     if (!timer) timer = setTimeout(scan, 200);
@@ -478,6 +805,7 @@
           collapsedChannels.clear();
           (m.collapsedChannels || []).forEach((k) => collapsedChannels.add(k));
           setDim(m.dim);
+          setChatOn(m.chat !== false);
           break;
         case 'mark':
           watched.add(m.id);
@@ -513,7 +841,11 @@
   function setup() {
     insertStyle();
     setDim(dim);
-    new MutationObserver(schedule).observe(document.documentElement, {
+    new MutationObserver((records) => {
+      // 流しているコメントの出し入れでは見直さない
+      if (records.every((r) => r.target.id === 'mytube-chat-overlay')) return;
+      schedule();
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
       attributes: true,
@@ -524,6 +856,8 @@
     window.addEventListener('yt-navigate-start', onNavigateStart);
     window.addEventListener('yt-navigate-finish', onPathChanged);
     schedule();
+    // チャット欄の中身（iframe）の入れ替わりはこのページの変化として見えないので、定期的に確かめる
+    setInterval(attachChat, 1000);
     const cfg = window.ytcfg && window.ytcfg.get;
     post({ type: 'ready', loggedIn: cfg ? !!window.ytcfg.get('LOGGED_IN') : null });
   }

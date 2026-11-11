@@ -161,6 +161,7 @@ public partial class MainWindow : Window
                     type = "init",
                     ids = _history.Ids,
                     dim = _settings.DimWatched,
+                    chat = _settings.ShowChatComments,
                     collapsedChannels = _settings.CollapsedChannels.Keys,
                 });
                 if (root.TryGetProperty("loggedIn", out var li) && li.ValueKind is JsonValueKind.True or JsonValueKind.False)
@@ -178,6 +179,10 @@ public partial class MainWindow : Window
                         _settings.CollapsedChannels.Remove(key);
                     SaveSettings();
                 }
+                break;
+            case "chatComments" when root.TryGetProperty("value", out var on) && on.ValueKind is JsonValueKind.True or JsonValueKind.False:
+                _settings.ShowChatComments = on.GetBoolean();
+                SaveSettings();
                 break;
             case "mark" when id is not null:
                 _history.Add(id);

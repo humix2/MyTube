@@ -13,6 +13,9 @@ public sealed class AppSettings
     /// <summary>視聴済みの動画を薄く表示する。</summary>
     public bool DimWatched { get; set; } = true;
 
+    /// <summary>ライブ配信のチャットを動画の上に流す。</summary>
+    public bool ShowChatComments { get; set; } = true;
+
     public string StartUrl { get; set; } = "https://www.youtube.com/feed/subscriptions";
 
     /// <summary>登録チャンネル新着でまとめて表示するチャンネル（"/@handle" → 表示名）。</summary>
