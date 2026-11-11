@@ -41,6 +41,10 @@
 
     /* 上部バー（ロゴ・検索など）もアプリ側に持たせるので隠す */
     #masthead-container, ytd-masthead { display: none !important; }
+    /* 動画の右下に出るチャンネルのアイコン（ブランディング透かし）は不要なので隠す */
+    .html5-video-player :is(.iv-branding, .branding-img-container, .ytp-branding-watermark, .annotation-type-custom.iv-branding) {
+      display: none !important;
+    }
     /* 読み込み中に出る仮の画面（スケルトン）の上部バーと左メニューも隠す */
     #masthead-skeleton-icons, .masthead_shell, #guide-skeleton { display: none !important; }
     ytd-app { --ytd-masthead-height: 0px !important; }
