@@ -140,6 +140,11 @@
     #mytube-chat-overlay .c img { height: 1.1em; width: auto; vertical-align: -.2em; }
     #mytube-chat-overlay .paid { color: #ffd54f; }
     #mytube-chat-overlay .member { color: #7ee787; }
+    /* 全画面でコメントを流しているときは YouTube のチャット欄を隠す（閉じると全画面を解除しても閉じたままになるため）。
+       隠している間は下の自前のチャット欄からコメントを拾う */
+    html.mytube-chat-on ytd-watch-flexy[fullscreen] :is(ytd-live-chat-frame, #panels-full-bleed-container:has(ytd-live-chat-frame)) {
+      display: none !important;
+    }
     /* 自前のチャット欄（チャット欄を閉じているとき用）。読み込みを止められないよう、消さずに画面の外に置く */
     #mytube-chat-source {
       position: fixed; left: -10000px; top: 0; width: 400px; height: 600px;
@@ -781,6 +786,7 @@
   function setChatOn(on) {
     chatOn = !!on;
     if (!chatOn) clearChat();
+    if (document.documentElement) document.documentElement.classList.toggle('mytube-chat-on', chatOn);
     attachChat();
   }
 
