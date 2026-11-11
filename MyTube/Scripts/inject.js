@@ -523,6 +523,16 @@
     return location.pathname === '/watch' ? new URLSearchParams(location.search).get('v') : null;
   }
 
+  // 自前のチャット欄に読み込んでよいのは、このサイトのチャットのページだけ
+  function isChatSrc(src) {
+    try {
+      const u = new URL(src);
+      return u.origin === location.origin && /^\/live_chat(_replay)?$/.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
   function isShown(frame) {
     if (frame.closest('ytd-live-chat-frame[collapsed]')) return false;
     const r = frame.getBoundingClientRect();
@@ -559,7 +569,7 @@
   function attachChat() {
     const id = currentVideoId();
     const ytFrame = id ? document.querySelector('ytd-live-chat-frame iframe') : null;
-    if (ytFrame && /\/live_chat(_replay)?\?/.test(ytFrame.src) && !(chatSrc && chatSrc.id === id && chatSrc.src === ytFrame.src)) {
+    if (ytFrame && isChatSrc(ytFrame.src) && !(chatSrc && chatSrc.id === id && chatSrc.src === ytFrame.src)) {
       chatSrc = { id, src: ytFrame.src };
     }
     const src = id ? (chatSrc && chatSrc.id === id ? chatSrc.src : liveChatSrc(id)) : null;

@@ -82,7 +82,12 @@ public partial class MainWindow : Window
 
         var core = _core = WebView.CoreWebView2;
         core.Settings.IsStatusBarEnabled = true;
+#if DEBUG
         core.Settings.AreDevToolsEnabled = true;
+#else
+        core.Settings.AreDevToolsEnabled = false; // 配布用では開発者ツールを開けないようにする
+#endif
+        core.PermissionRequested += OnPermissionRequested;
 
         await LoadExtensionsAsync(core);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(LoadInjectScript());
@@ -144,16 +149,36 @@ public partial class MainWindow : Window
 
     // ---- ページとのやりとり ----
 
+    // カメラ・マイク・通知・位置情報などはすべて断る。動画の自動再生だけは再生に関わるので許可する
+    private static void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e) =>
+        e.State = e.PermissionKind == CoreWebView2PermissionKind.Autoplay
+            ? CoreWebView2PermissionState.Allow
+            : CoreWebView2PermissionState.Deny;
+
+    /// <summary>メッセージの項目が文字列ならその値。それ以外（数値・なし・長すぎる）は null。</summary>
+    private static string? GetString(JsonElement obj, string name, int maxLength = 200) =>
+        obj.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String &&
+        p.GetString() is { } s && s.Length <= maxLength ? s : null;
+
+    private static bool? GetBool(JsonElement obj, string name) =>
+        obj.TryGetProperty(name, out var p) && p.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? p.GetBoolean() : null;
+
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source) || !YouTubeUrl.IsYouTube(source)) return;
 
-        using var doc = JsonDocument.Parse(e.WebMessageAsJson);
+        // ページから来るものなので、想定外の形でも落ちないように中身を確かめてから使う
+        JsonDocument doc;
+        try { doc = JsonDocument.Parse(e.WebMessageAsJson); }
+        catch (JsonException) { return; }
+        using var _ = doc;
         var root = doc.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var typeProp)) return;
-        var id = root.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+        if (root.ValueKind != JsonValueKind.Object) return;
+        var id = GetString(root, "id");
+        if (!YouTubeUrl.IsVideoId(id)) id = null;
 
-        switch (typeProp.GetString())
+        switch (GetString(root, "type"))
         {
             case "ready":
                 Post(new
@@ -164,24 +189,26 @@ public partial class MainWindow : Window
                     chat = _settings.ShowChatComments,
                     collapsedChannels = _settings.CollapsedChannels.Keys,
                 });
-                if (root.TryGetProperty("loggedIn", out var li) && li.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                    SetLoggedIn(li.GetBoolean());
+                if (GetBool(root, "loggedIn") is { } loggedIn)
+                    SetLoggedIn(loggedIn);
                 break;
             case "openSearch":
                 OpenSearch();
                 break;
             case "collapseChannel":
-                if (root.TryGetProperty("key", out var keyProp) && keyProp.GetString() is { Length: > 0 } key)
+                // チャンネルは "/@handle" か "/channel/ID" の形だけ受け付ける
+                if (GetString(root, "key") is { } key &&
+                    (key.StartsWith("/@", StringComparison.Ordinal) || key.StartsWith("/channel/", StringComparison.Ordinal)))
                 {
-                    if (root.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.True)
-                        _settings.CollapsedChannels[key] = root.TryGetProperty("name", out var n) ? n.GetString() ?? key : key;
+                    if (GetBool(root, "value") == true)
+                        _settings.CollapsedChannels[key] = GetString(root, "name") ?? key;
                     else
                         _settings.CollapsedChannels.Remove(key);
                     SaveSettings();
                 }
                 break;
-            case "chatComments" when root.TryGetProperty("value", out var on) && on.ValueKind is JsonValueKind.True or JsonValueKind.False:
-                _settings.ShowChatComments = on.GetBoolean();
+            case "chatComments" when GetBool(root, "value") is { } on:
+                _settings.ShowChatComments = on;
                 SaveSettings();
                 break;
             case "mark" when id is not null:
@@ -238,11 +265,23 @@ public partial class MainWindow : Window
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
+        if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri))
+        {
+            e.Cancel = true;
+            return;
+        }
+
         // 説明欄などの外部リンク（youtube.com/redirect）は既定のブラウザで開く
-        if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) && YouTubeUrl.GetRedirectTarget(uri) is { } target)
+        if (YouTubeUrl.GetRedirectTarget(uri) is { } target)
         {
             e.Cancel = true;
             OpenExternal(target);
+        }
+        // YouTube とログイン画面以外もアプリでは開かず、既定のブラウザに回す
+        else if (!YouTubeUrl.IsAllowedInApp(uri))
+        {
+            e.Cancel = true;
+            OpenExternal(e.Uri);
         }
     }
 

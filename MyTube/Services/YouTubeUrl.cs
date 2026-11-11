@@ -12,6 +12,25 @@ public static partial class YouTubeUrl
         uri.Host.EndsWith(".youtube.com", StringComparison.OrdinalIgnoreCase) ||
         uri.Host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsVideoId(string? id) => id is not null && VideoIdRegex().IsMatch(id);
+
+    /// <summary>
+    /// アプリの中で開いてよいページか。アドレスバーがなく偽のページを見分けられないので、
+    /// YouTube とログインに使う Google のページだけにする（それ以外は既定のブラウザで開く）。
+    /// </summary>
+    public static bool IsAllowedInApp(Uri uri)
+    {
+        if (uri.Scheme == "chrome-extension" || uri.AbsoluteUri == "about:blank") return true;
+        if (uri.Scheme is not ("https" or "http")) return false;
+        if (IsYouTube(uri)) return true; // http でも YouTube 側で https に切り替わる
+        if (uri.Scheme != "https") return false;
+        var host = uri.Host;
+        // ログインの途中で accounts.google.co.jp などの国別のドメインも経由する
+        return host.Equals("google.com", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".google.com", StringComparison.OrdinalIgnoreCase) ||
+            host.StartsWith("accounts.google.", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>/watch?v=ID・/shorts/ID・youtu.be/ID から動画IDを取り出す。</summary>
     public static string? GetVideoId(string? url)
     {
@@ -26,7 +45,7 @@ public static partial class YouTubeUrl
         else if (path.StartsWith("/shorts/", StringComparison.OrdinalIgnoreCase))
             id = path["/shorts/".Length..].Split('/')[0];
 
-        return id is not null && VideoIdRegex().IsMatch(id) ? id : null;
+        return IsVideoId(id) ? id : null;
     }
 
     /// <summary>youtube.com/redirect?q=... の飛び先を返す。</summary>

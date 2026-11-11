@@ -50,8 +50,15 @@ public sealed class WatchHistoryStore
 
     private void Save()
     {
-        var tmp = _path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(_items));
-        File.Move(tmp, _path, overwrite: true);
+        try
+        {
+            var tmp = _path + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(_items));
+            File.Move(tmp, _path, overwrite: true);
+        }
+        catch (Exception)
+        {
+            // ウイルス対策ソフトがファイルを掴んでいるときなど。次に保存するときに書かれるので止めない
+        }
     }
 }
