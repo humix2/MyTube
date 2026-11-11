@@ -82,29 +82,31 @@
     [data-mytube-chan-sig]:hover .mytube-chan { display: block; }
 
     /* 動画ページ：右の列を「関連動画／コメント」のタブにして、右の列だけスクロールさせる */
+    /* 右の列は「タブの帯（固定）」と「その下のスクロールする部分」に分ける。
+       帯をスクロールの外に置くので、帯に背景を塗らなくても文字が帯の裏に回り込まない
+       （塗ると動画まわりの光＝アンビエントモードの上に黒い枠が浮く） */
     ytd-watch-flexy[mytube-split] #secondary {
       position: sticky; top: 0; align-self: flex-start;
-      max-height: calc(100vh - 24px); overflow-y: auto; overscroll-behavior: contain;
+      max-height: calc(100vh - 24px);
+      display: flex; flex-direction: column;
       padding-top: 0 !important;
+    }
+    ytd-watch-flexy[mytube-split] #secondary-inner {
+      flex: 1 1 auto; min-height: 0;
+      overflow-y: auto; overscroll-behavior: contain;
       scrollbar-width: thin; scrollbar-color: #555 transparent;
     }
-    /* タブの帯：右の列の上端に固定し、不透明な背景で下を流れる文字を隠す */
     #mytube-side-tabs {
-      position: sticky; top: 0; z-index: 5;
+      flex: none;
       display: flex; gap: 8px; margin: 0 0 12px; padding: 12px 0 10px;
-      background: #0f0f0f;
-      /* コメントは帯より右にはみ出すことがあるので、背景を右の列の端まで伸ばす（列の外は切れる） */
-      box-shadow: 48px 0 0 #0f0f0f;
-    }
-    #mytube-side-tabs::after {
-      content: ""; position: absolute; left: 0; right: -48px; bottom: 0; height: 1px; background: #272727;
+      border-bottom: 1px solid rgba(255,255,255,.1);
     }
     #mytube-side-tabs button {
       padding: 6px 12px; border: 0; border-radius: 8px; cursor: pointer;
       font: 500 14px/20px Roboto, "Yu Gothic UI", sans-serif;
-      color: #f1f1f1; background: #272727;
+      color: #f1f1f1; background: rgba(255,255,255,.1);
     }
-    #mytube-side-tabs button:hover { background: #3f3f3f; }
+    #mytube-side-tabs button:hover { background: rgba(255,255,255,.2); }
     #mytube-side-tabs button[aria-selected="true"] { color: #0f0f0f; background: #f1f1f1; }
     ytd-watch-flexy:not([mytube-split]) #mytube-side-tabs,
     ytd-watch-flexy:not([mytube-split]) #mytube-comments-panel { display: none; }
@@ -205,7 +207,8 @@
     if (!flexy) return;
     const comments = flexy.querySelector('ytd-comments#comments');
     const secondary = flexy.querySelector('#secondary');
-    const related = secondary && secondary.querySelector('#related');
+    const inner = secondary && secondary.querySelector('#secondary-inner');
+    const related = inner && inner.querySelector('#related');
     if (!comments || !related) return;
 
     const active = location.pathname === '/watch' &&
@@ -235,14 +238,15 @@
         b.textContent = label;
         b.addEventListener('click', () => {
           sideTab = tab;
-          secondary.scrollTop = 0;
+          inner.scrollTop = 0;
           applyWatchLayout();
         });
         tabs.appendChild(b);
       }
-      related.before(tabs);
+      // タブはスクロールする部分（#secondary-inner）の外、右の列の一番上に置く
+      secondary.prepend(tabs);
       // YouTube はウィンドウのスクロールで続きを読み込むので、右の列のスクロールも伝える
-      secondary.addEventListener('scroll', () => window.dispatchEvent(new Event('scroll')), { passive: true });
+      inner.addEventListener('scroll', () => window.dispatchEvent(new Event('scroll')), { passive: true });
     }
     if (!panel) {
       panel = document.createElement('div');
