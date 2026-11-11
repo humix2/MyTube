@@ -58,6 +58,13 @@
     [data-mytube-id]:hover > .mytube-toggle { display: block; }
     [data-mytube-watched="1"] > .mytube-toggle { display: block; background: rgba(6,95,212,.9); }
     [data-mytube-state="yt"] > .mytube-toggle { cursor: default; }
+    /* 履歴ページは全部見た動画なので、薄く表示しない。ラベルもマウスを乗せたときだけ出す */
+    html.mytube-dim ytd-browse[page-subtype="history"] [data-mytube-watched="1"] { opacity: 1; }
+    ytd-browse[page-subtype="history"] [data-mytube-watched="1"]:not(:hover) > .mytube-toggle { display: none; }
+    /* 履歴ページで「動画」の絞り込みに切り替わるまで、一覧を隠しておく（絞り込みのボタンは見せる） */
+    html.mytube-history-loading ytd-browse[page-subtype="history"] :is(ytd-item-section-renderer, ytd-reel-shelf-renderer, ytd-continuation-item-renderer) {
+      visibility: hidden !important;
+    }
     .mytube-toggle .hover { display: none; }
     .mytube-toggle:hover .hover { display: inline; }
     .mytube-toggle:hover .hover ~ .normal { display: none; }
@@ -195,6 +202,82 @@
     }
     applyGrouping();
     applyWatchLayout();
+    applyHistoryFilter();
+  }
+
+  // ---- 履歴ページ：最初は「動画」の絞り込みを選んでおく（ショートを出さない） ----
+
+  const HISTORY_PATH = '/feed/history';
+  const VIDEO_CHIP_LABELS = ['動画', 'Videos'];
+  const HISTORY_SECTIONS = 'ytd-browse[page-subtype="history"] ytd-item-section-renderer';
+  let historyFilterPending = false; // 履歴ページに来たばかりで、まだ「動画」を押していない
+  let historyWaitFor = null;        // 「動画」を押す前の一覧（これが入れ替わったら表示する）
+  let historyRevealTimer = 0;
+  let historySettleTimer = 0;
+  let lastPath = '';
+
+  // 「すべて」の一覧が一瞬見えてから切り替わるとちらつくので、切り替わるまで一覧を隠す
+  function hideHistory(on) {
+    document.documentElement.classList.toggle('mytube-history-loading', on);
+    clearTimeout(historyRevealTimer);
+    // うまく切り替えられなくても、一覧が出ないままにならないようにする
+    if (on) historyRevealTimer = setTimeout(() => { historyFilterPending = false; hideHistory(false); }, 3000);
+  }
+
+  // 履歴ページに入ったときだけ押す（その後に自分で「すべて」などを選んだら、そのままにする）
+  function onPathChanged() {
+    const path = location.pathname;
+    if (path === lastPath) return;
+    lastPath = path;
+    historyFilterPending = path === HISTORY_PATH;
+    historyWaitFor = null;
+    hideHistory(historyFilterPending);
+    if (historyFilterPending) schedule();
+  }
+
+  // 画面が切り替わる前に、行き先が履歴ページなら先に隠しておく
+  function onNavigateStart(e) {
+    const url = e.detail && e.detail.url;
+    if (!url) return;
+    try {
+      if (new URL(url, location.origin).pathname === HISTORY_PATH && lastPath !== HISTORY_PATH) hideHistory(true);
+    } catch { /* 無視 */ }
+  }
+
+  function applyHistoryFilter() {
+    if (historyWaitFor) {
+      // 一覧が「動画」の内容に入れ替わったら表示する
+      if (!historyWaitFor.isConnected || document.querySelector(HISTORY_SECTIONS) !== historyWaitFor) {
+        historyWaitFor = null;
+        hideHistory(false);
+        return;
+      }
+      // 同じ部品を使い回して中身だけ入れ替わる場合もあるので、画面の変化が落ち着いたら表示する
+      clearTimeout(historySettleTimer);
+      historySettleTimer = setTimeout(() => {
+        if (!historyWaitFor) return;
+        historyWaitFor = null;
+        hideHistory(false);
+      }, 800);
+      return;
+    }
+    if (!historyFilterPending) return;
+    if (location.pathname !== HISTORY_PATH) { historyFilterPending = false; hideHistory(false); return; }
+    const page = document.querySelector('ytd-browse[page-subtype="history"]');
+    if (!page) return;
+    const chips = page.querySelectorAll('yt-chip-cloud-chip-renderer, chip-view-model, chip-shape');
+    for (const chip of chips) {
+      if (!VIDEO_CHIP_LABELS.includes(chip.textContent.trim())) continue;
+      historyFilterPending = false;
+      const selected = chip.hasAttribute('selected') ||
+        chip.getAttribute('aria-selected') === 'true' ||
+        !!chip.querySelector('[aria-selected="true"]');
+      if (selected) { hideHistory(false); return; }
+      historyWaitFor = document.querySelector(HISTORY_SECTIONS);
+      (chip.querySelector('button, [role="tab"]') || chip).click();
+      if (!historyWaitFor) hideHistory(false);
+      return;
+    }
   }
 
   // ---- 動画ページ：コメントを右の列のタブに移す ----
@@ -414,6 +497,10 @@
       attributes: true,
       attributeFilter: ['href'],
     });
+    onPathChanged();
+    // YouTube はページを読み直さずに画面を切り替えるので、切り替わるたびに確かめる
+    window.addEventListener('yt-navigate-start', onNavigateStart);
+    window.addEventListener('yt-navigate-finish', onPathChanged);
     schedule();
     const cfg = window.ytcfg && window.ytcfg.get;
     post({ type: 'ready', loggedIn: cfg ? !!window.ytcfg.get('LOGGED_IN') : null });
