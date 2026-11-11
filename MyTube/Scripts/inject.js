@@ -41,6 +41,8 @@
 
     /* 上部バー（ロゴ・検索など）もアプリ側に持たせるので隠す */
     #masthead-container, ytd-masthead { display: none !important; }
+    /* 読み込み中に出る仮の画面（スケルトン）の上部バーと左メニューも隠す */
+    #masthead-skeleton-icons, .masthead_shell, #guide-skeleton { display: none !important; }
     ytd-app { --ytd-masthead-height: 0px !important; }
     ytd-app ytd-page-manager { margin-top: 0 !important; }
     /* 分類ボタンの後ろの半透明の板は「上部バー＋分類ボタン」の高さで固定されているので、上部バーの分だけ上にずらす */
@@ -488,8 +490,24 @@
   }
 
   // このスクリプトはページの読み込み開始直後に動くので、DOM ができてから準備する
-  function setup() {
+  // YouTube の上部バーなどが一瞬でも見えないよう、CSS はページの中身より先に入れる。
+  // このスクリプトは <html> ができる前に動くことがあるので、そのときは <html> ができた瞬間に入れる
+  function insertStyle() {
+    if (style.isConnected) return;
     (document.head || document.documentElement).appendChild(style);
+  }
+  if (document.documentElement) {
+    insertStyle();
+  } else {
+    new MutationObserver((_, obs) => {
+      if (!document.documentElement) return;
+      insertStyle();
+      obs.disconnect();
+    }).observe(document, { childList: true });
+  }
+
+  function setup() {
+    insertStyle();
     setDim(dim);
     new MutationObserver(schedule).observe(document.documentElement, {
       childList: true,
