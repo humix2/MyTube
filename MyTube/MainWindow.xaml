@@ -268,6 +268,26 @@
                             <TextBlock Style="{StaticResource NavLabel}" Text="チャンネル管理" />
                         </StackPanel>
                     </Button>
+                    <!-- 急上昇：YouTube の公式急上昇ページは 2025年7月に廃止されたため、
+                         ゲームチャンネルの急上昇一覧（/gaming の「急上昇動画」の「すべて表示」先）を開く -->
+                    <Border Height="1" Background="#3F3F3F" Margin="4,6" />
+                    <Button Style="{StaticResource NavButton}" Click="Nav_Click" Tag="/gaming/trending"
+                            ToolTip="急上昇：ゲーム">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource NavIcon}" Text="&#xE7FC;" />
+                            <TextBlock Style="{StaticResource NavLabel}" Text="急上昇：ゲーム" />
+                        </StackPanel>
+                    </Button>
+                    <!-- YouTube 音楽チャンネル（UC-9-kyTW8ZkZNDHQJ6FgpwQ）の再生リスト「人気上昇中の曲 - 日本」。
+                         開けなくなったら、そのチャンネルのページから新しい ID を取り直す -->
+                    <Button Style="{StaticResource NavButton}" Click="Nav_Click"
+                            Tag="/playlist?list=OLAK5uy_nMa6r07BbcC_Q8PrrS1CVHH2aGJRIkWu0"
+                            ToolTip="急上昇：音楽（人気上昇中の曲 - 日本）">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource NavIcon}" Text="&#xE8D6;" />
+                            <TextBlock Style="{StaticResource NavLabel}" Text="急上昇：音楽" />
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </DockPanel>
         </Border>
