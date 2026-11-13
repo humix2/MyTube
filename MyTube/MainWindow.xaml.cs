@@ -25,13 +25,25 @@ public partial class MainWindow : Window
 
     private readonly AppSettings _settings;
     private readonly WatchHistoryStore _history;
-    private CoreWebView2? _core;
+    private readonly string _injectScript = LoadInjectScript();
+    private CoreWebView2Environment? _env;
+    private bool _extensionsLoaded;
+
+    // 分割画面。並び順がそのまま配置の順（0 番目が「大きい枠」）
+    private readonly List<VideoPane> _panes = [];
+    private VideoPane? _active;
+    private PaneLayout _layout = PaneLayout.Single;
+    private bool _layoutBusy;
+
+    /// <summary>選択中の画面。左メニュー・検索・戻る/進むはこの画面に効く。</summary>
+    private CoreWebView2? ActiveCore => _active?.Core;
 
     // 全画面表示に入る前のウィンドウ状態
     private bool _isFullScreen;
+    private VideoPane? _fullScreenPane;
     private WindowState _stateBeforeFullScreen;
     private Rect _boundsBeforeFullScreen;
-    private Thickness _webViewMargin;
+    private Thickness _paneHostMargin;
 
     // 左メニュー
     private const double SidebarExpandedWidth = 200;
@@ -51,26 +63,23 @@ public partial class MainWindow : Window
         _history = new WatchHistoryStore(Path.Combine(DataDir, "watched.json"));
 
         InitializeComponent();
-        _webViewMargin = WebView.Margin;
+        _paneHostMargin = PaneHost.Margin;
         RestoreWindowBounds();
         DimWatchedCheck.IsChecked = _settings.DimWatched;
         SetSidebarCollapsed(_settings.SidebarCollapsed, animate: false);
 
         SourceInitialized += OnSourceInitialized;
         StateChanged += (_, _) => UpdateWindowStateVisuals();
-        Loaded += async (_, _) => await InitializeWebViewAsync();
+        Loaded += async (_, _) => await InitializeAsync();
         Closing += (_, _) => SaveSettings();
     }
 
-    private async Task InitializeWebViewAsync()
+    private async Task InitializeAsync()
     {
         try
         {
-            WebView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0x0F, 0x0F, 0x0F);
-
             var options = new CoreWebView2EnvironmentOptions { AreBrowserExtensionsEnabled = true };
-            var env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(DataDir, "WebView2"), options);
-            await WebView.EnsureCoreWebView2Async(env);
+            _env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(DataDir, "WebView2"), options);
         }
         catch (Exception ex)
         {
@@ -80,32 +89,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var core = _core = WebView.CoreWebView2;
-        core.Settings.IsStatusBarEnabled = true;
-#if DEBUG
-        core.Settings.AreDevToolsEnabled = true;
-#else
-        core.Settings.AreDevToolsEnabled = false; // 配布用では開発者ツールを開けないようにする
-#endif
-        core.PermissionRequested += OnPermissionRequested;
-
-        await LoadExtensionsAsync(core);
-        await core.AddScriptToExecuteOnDocumentCreatedAsync(LoadInjectScript());
-
-        core.WebMessageReceived += OnWebMessageReceived;
-        core.NewWindowRequested += OnNewWindowRequested;
-        core.NavigationStarting += OnNavigationStarting;
-        core.SourceChanged += (_, _) => OnSourceChanged();
-        core.HistoryChanged += (_, _) => UpdateNavButtons();
-        core.DocumentTitleChanged += (_, _) =>
-        {
-            var page = core.DocumentTitle?.Replace(" - YouTube", "").Trim();
-            Title = string.IsNullOrEmpty(page) ? "MyTube" : $"{page} - MyTube";
-            TitleText.Text = string.IsNullOrEmpty(page) ? "MyTube" : page;
-        };
-        core.ContainsFullScreenElementChanged += (_, _) => SetFullScreen(core.ContainsFullScreenElement);
-
-        core.Navigate(_settings.StartUrl);
+        if (await CreatePaneAsync(_settings.StartUrl, activate: true) is null)
+            Close();
     }
 
     private static string LoadInjectScript()
@@ -147,6 +132,262 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---- 分割画面 ----
+
+    /// <summary>
+    /// 画面を 1 つ追加して url を開く。どの画面も同じ WebView2 の環境を使うので、
+    /// ログイン・Cookie・拡張機能（広告ブロック）は共通になる。
+    /// </summary>
+    private async Task<VideoPane?> CreatePaneAsync(string url, bool activate)
+    {
+        if (_env is null) return null;
+
+        var pane = new VideoPane((Style)FindResource("ToolButton"));
+        pane.ActivateRequested += (_, _) => SetActivePane(pane, focus: true);
+        pane.CloseRequested += (_, _) => ClosePane(pane);
+        pane.MakeMainRequested += (_, _) => MovePaneToMain(pane);
+        pane.WebView.GotFocus += (_, _) => SetActivePane(pane, focus: false);
+        _panes.Add(pane);
+        PaneHost.Children.Add(pane);
+        ApplyLayout();
+
+        try
+        {
+            await pane.WebView.EnsureCoreWebView2Async(_env);
+        }
+        catch (Exception ex)
+        {
+            RemovePane(pane);
+            ApplyLayout();
+            MessageBox.Show(this, $"画面を開けませんでした。\n\n{ex.Message}", "MyTube",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            return null;
+        }
+        if (!_panes.Contains(pane)) return null; // 準備中に閉じられた
+
+        var core = pane.WebView.CoreWebView2;
+        pane.Attach(core);
+        core.Settings.IsStatusBarEnabled = true;
+#if DEBUG
+        core.Settings.AreDevToolsEnabled = true;
+#else
+        core.Settings.AreDevToolsEnabled = false; // 配布用では開発者ツールを開けないようにする
+#endif
+        core.PermissionRequested += OnPermissionRequested;
+
+        // 拡張機能はプロファイル（全画面で共通）に入るので、最初の 1 回だけ読み込む
+        if (!_extensionsLoaded)
+        {
+            _extensionsLoaded = true;
+            await LoadExtensionsAsync(core);
+        }
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(_injectScript);
+
+        core.WebMessageReceived += (_, e) => OnWebMessageReceived(pane, e);
+        core.NewWindowRequested += (_, e) => OnNewWindowRequested(pane, e);
+        core.NavigationStarting += OnNavigationStarting;
+        core.ContextMenuRequested += (_, e) => OnContextMenuRequested(pane, e);
+        core.SourceChanged += (_, _) => OnSourceChanged(pane);
+        core.HistoryChanged += (_, _) => { if (pane == _active) UpdateNavButtons(); };
+        core.DocumentTitleChanged += (_, _) =>
+        {
+            pane.SetTitle(core.DocumentTitle?.Replace(" - YouTube", "").Trim() ?? "");
+            if (pane == _active) UpdateTitle();
+        };
+        core.ContainsFullScreenElementChanged += (_, _) =>
+        {
+            if (core.ContainsFullScreenElement) SetFullScreen(pane);
+            else if (_fullScreenPane == pane) SetFullScreen(null);
+        };
+
+        if (activate || _active is null) SetActivePane(pane, focus: activate);
+        ApplyAudioFocus();
+        core.Navigate(url);
+        return pane;
+    }
+
+    private void RemovePane(VideoPane pane)
+    {
+        if (!_panes.Remove(pane)) return;
+        if (_fullScreenPane == pane) SetFullScreen(null);
+        PaneHost.Children.Remove(pane);
+        pane.WebView.Dispose();
+        if (_active == pane && _panes.Count > 0) SetActivePane(_panes[0], focus: false);
+    }
+
+    private void ClosePane(VideoPane pane)
+    {
+        if (_panes.Count <= 1) return;
+        RemovePane(pane);
+        _layout = PaneLayoutDef.DefaultFor(_panes.Count);
+        ApplyLayout();
+    }
+
+    /// <summary>「大1＋小N」の並べ方で、この画面を大きい枠（0 番目）に移す。</summary>
+    private void MovePaneToMain(VideoPane pane)
+    {
+        var index = _panes.IndexOf(pane);
+        if (index <= 0) return;
+        (_panes[0], _panes[index]) = (_panes[index], _panes[0]);
+        ApplyLayout();
+        SetActivePane(pane, focus: true);
+    }
+
+    /// <summary>動画を新しい画面で開く。もう 4 画面あるときは元の画面で開く。</summary>
+    private async void OpenInNewPane(string url, VideoPane source)
+    {
+        if (_panes.Count >= PaneLayoutDef.MaxPanes || _layoutBusy || _isFullScreen)
+        {
+            source.Core?.Navigate(url);
+            return;
+        }
+        _layoutBusy = true;
+        try
+        {
+            _layout = PaneLayoutDef.DefaultFor(_panes.Count + 1);
+            await CreatePaneAsync(url, activate: true);
+        }
+        finally
+        {
+            _layoutBusy = false;
+        }
+    }
+
+    private async Task SetLayoutAsync(PaneLayout layout)
+    {
+        if (_layoutBusy) return;
+        _layoutBusy = true;
+        try
+        {
+            var target = PaneLayoutDef.Get(layout).Count;
+            // 減らすときは、選択中の画面を残して後ろから閉じる
+            while (_panes.Count > target)
+                RemovePane(_panes.Last(p => p != _active));
+
+            _layout = layout;
+            ApplyLayout();
+
+            while (_panes.Count < target)
+            {
+                if (await CreatePaneAsync(_settings.StartUrl, activate: false) is null) break;
+            }
+        }
+        finally
+        {
+            _layoutBusy = false;
+        }
+    }
+
+    /// <summary>並べ方に合わせて画面を置き直す。全画面中はその画面だけを出す。</summary>
+    private void ApplyLayout()
+    {
+        PaneHost.RowDefinitions.Clear();
+        PaneHost.ColumnDefinitions.Clear();
+
+        if (_fullScreenPane is { } fs)
+        {
+            foreach (var p in _panes)
+                p.Visibility = p == fs ? Visibility.Visible : Visibility.Collapsed;
+            Place(fs, (0, 0, 1, 1));
+            fs.SetChrome(split: false, active: true, canMakeMain: false);
+            return;
+        }
+
+        var def = PaneLayoutDef.Get(_layout);
+        foreach (var w in def.Columns)
+            PaneHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(w, GridUnitType.Star) });
+        foreach (var h in def.Rows)
+            PaneHost.RowDefinitions.Add(new RowDefinition { Height = new GridLength(h, GridUnitType.Star) });
+
+        for (var i = 0; i < _panes.Count; i++)
+        {
+            var visible = i < def.Cells.Length;
+            _panes[i].Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (visible) Place(_panes[i], def.Cells[i]);
+        }
+        UpdatePaneChrome();
+    }
+
+    private static void Place(UIElement pane, (int Row, int Column, int RowSpan, int ColumnSpan) cell)
+    {
+        Grid.SetRow(pane, cell.Row);
+        Grid.SetColumn(pane, cell.Column);
+        Grid.SetRowSpan(pane, cell.RowSpan);
+        Grid.SetColumnSpan(pane, cell.ColumnSpan);
+    }
+
+    private void UpdatePaneChrome()
+    {
+        if (_fullScreenPane is not null) return;
+        var split = _panes.Count > 1;
+        var hasMain = PaneLayoutDef.Get(_layout).HasMain;
+        for (var i = 0; i < _panes.Count; i++)
+            _panes[i].SetChrome(split, active: _panes[i] == _active, canMakeMain: hasMain && i > 0);
+    }
+
+    private void SetActivePane(VideoPane pane, bool focus)
+    {
+        if (!_panes.Contains(pane)) return;
+        if (_active != pane)
+        {
+            _active = pane;
+            UpdatePaneChrome();
+            ApplyAudioFocus();
+            UpdateTitle();
+            UpdateNavButtons();
+            UpdateAutoCollapse();
+        }
+        if (focus) pane.WebView.Focus();
+    }
+
+    /// <summary>「音は選択中の画面だけ」のときは、選択中の画面以外を消音にする。</summary>
+    private void ApplyAudioFocus()
+    {
+        if (!_settings.AudioFollowsActive) return;
+        foreach (var p in _panes)
+        {
+            if (p.Core is { } core) core.IsMuted = p != _active;
+        }
+    }
+
+    private void Layout_Click(object sender, RoutedEventArgs e)
+    {
+        var items = new List<Control>();
+        foreach (var def in PaneLayoutDef.All)
+        {
+            var layout = def.Layout;
+            items.Add(MakeMenuItem(def.Label, () => _ = SetLayoutAsync(layout), isChecked: layout == _layout));
+        }
+        items.Add(new Separator());
+        items.Add(MakeMenuItem("音は選択中の画面だけ出す", () =>
+        {
+            _settings.AudioFollowsActive = !_settings.AudioFollowsActive;
+            ApplyAudioFocus();
+        }, isChecked: _settings.AudioFollowsActive));
+        OpenMenu((FrameworkElement)sender, PlacementMode.Bottom, items);
+    }
+
+    protected override void OnPreviewKeyDown(KeyEventArgs e)
+    {
+        // Ctrl+1〜4 で画面を選ぶ
+        if (Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            var index = e.Key switch
+            {
+                >= Key.D1 and <= Key.D4 => e.Key - Key.D1,
+                >= Key.NumPad1 and <= Key.NumPad4 => e.Key - Key.NumPad1,
+                _ => -1,
+            };
+            if (index >= 0 && index < _panes.Count && _panes[index].Visibility == Visibility.Visible)
+            {
+                SetActivePane(_panes[index], focus: true);
+                e.Handled = true;
+                return;
+            }
+        }
+        base.OnPreviewKeyDown(e);
+    }
+
     // ---- ページとのやりとり ----
 
     // カメラ・マイク・通知・位置情報などはすべて断る。動画の自動再生だけは再生に関わるので許可する
@@ -164,7 +405,7 @@ public partial class MainWindow : Window
         obj.TryGetProperty(name, out var p) && p.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? p.GetBoolean() : null;
 
-    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    private void OnWebMessageReceived(VideoPane pane, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source) || !YouTubeUrl.IsYouTube(source)) return;
 
@@ -181,7 +422,7 @@ public partial class MainWindow : Window
         switch (GetString(root, "type"))
         {
             case "ready":
-                Post(new
+                Post(pane, new
                 {
                     type = "init",
                     ids = _history.Ids,
@@ -192,7 +433,11 @@ public partial class MainWindow : Window
                 if (GetBool(root, "loggedIn") is { } loggedIn)
                     SetLoggedIn(loggedIn);
                 break;
+            case "activate":
+                SetActivePane(pane, focus: false);
+                break;
             case "openSearch":
+                SetActivePane(pane, focus: false);
                 OpenSearch();
                 break;
             case "collapseChannel":
@@ -211,56 +456,98 @@ public partial class MainWindow : Window
                 _settings.ShowChatComments = on;
                 SaveSettings();
                 break;
+            // 視聴済みはほかの画面の一覧にも反映する
             case "mark" when id is not null:
                 _history.Add(id);
+                PostAll(new { type = "mark", id }, except: pane);
                 break;
             case "unmark" when id is not null:
                 _history.Remove(id);
+                PostAll(new { type = "unmark", id }, except: pane);
                 break;
         }
     }
 
-    private void Post(object message) =>
-        _core?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+    private static void Post(VideoPane pane, object message) =>
+        pane.Core?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
 
-    private void OnSourceChanged()
+    private void PostAll(object message, VideoPane? except = null)
     {
-        UpdateNavButtons();
-
-        // 動画を開いたら視聴済みとして記録
-        var id = YouTubeUrl.GetVideoId(_core?.Source);
-        if (id is not null && _history.Add(id))
-            Post(new { type = "mark", id });
-
-        // 動画を見ている間は左メニューを畳んで画面を広く使う
-        if (_settings.AutoCollapseOnWatch)
+        var json = JsonSerializer.Serialize(message);
+        foreach (var p in _panes)
         {
-            if (id is not null && !_sidebarCollapsed)
-            {
-                SetSidebarCollapsed(true, animate: true);
-                _autoCollapsed = true;
-            }
-            else if (id is null && _autoCollapsed)
-            {
-                _autoCollapsed = false;
-                SetSidebarCollapsed(false, animate: true);
-            }
+            if (p != except) p.Core?.PostWebMessageAsJson(json);
         }
+    }
+
+    private void OnSourceChanged(VideoPane pane)
+    {
+        // 動画を開いたら視聴済みとして記録
+        var id = YouTubeUrl.GetVideoId(pane.Core?.Source);
+        if (id is not null && _history.Add(id))
+            PostAll(new { type = "mark", id });
+
+        if (pane == _active)
+        {
+            UpdateNavButtons();
+            UpdateAutoCollapse();
+        }
+    }
+
+    /// <summary>選択中の画面で動画を見ている間は、左メニューを畳んで画面を広く使う。</summary>
+    private void UpdateAutoCollapse()
+    {
+        if (!_settings.AutoCollapseOnWatch) return;
+        var id = YouTubeUrl.GetVideoId(ActiveCore?.Source);
+        if (id is not null && !_sidebarCollapsed)
+        {
+            SetSidebarCollapsed(true, animate: true);
+            _autoCollapsed = true;
+        }
+        else if (id is null && _autoCollapsed)
+        {
+            _autoCollapsed = false;
+            SetSidebarCollapsed(false, animate: true);
+        }
+    }
+
+    private void UpdateTitle()
+    {
+        var page = _active?.PageTitle;
+        Title = string.IsNullOrEmpty(page) ? "MyTube" : $"{page} - MyTube";
+        TitleText.Text = string.IsNullOrEmpty(page) ? "MyTube" : page;
     }
 
     // ---- リンクの扱い ----
 
-    private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    private void OnNewWindowRequested(VideoPane pane, CoreWebView2NewWindowRequestedEventArgs e)
     {
         e.Handled = true;
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri)) return;
 
         if (YouTubeUrl.GetRedirectTarget(uri) is { } target)
             OpenExternal(target);
+        // 動画を中クリック・Ctrl+クリックしたら、分割して新しい画面で開く
+        else if (YouTubeUrl.GetVideoId(e.Uri) is not null)
+            OpenInNewPane(e.Uri, pane);
         else if (YouTubeUrl.IsYouTube(uri))
-            _core?.Navigate(e.Uri);
+            pane.Core?.Navigate(e.Uri);
         else
             OpenExternal(e.Uri);
+    }
+
+    /// <summary>動画のリンクの右クリックメニューに「分割画面で開く」を足す。</summary>
+    private void OnContextMenuRequested(VideoPane pane, CoreWebView2ContextMenuRequestedEventArgs e)
+    {
+        var target = e.ContextMenuTarget;
+        if (_env is null || !target.HasLinkUri || _panes.Count >= PaneLayoutDef.MaxPanes || _isFullScreen) return;
+        var url = target.LinkUri;
+        if (YouTubeUrl.GetVideoId(url) is null) return;
+
+        var item = _env.CreateContextMenuItem("分割画面で開く", null, CoreWebView2ContextMenuItemKind.Command);
+        item.CustomItemSelected += (_, _) => Dispatcher.BeginInvoke(() => OpenInNewPane(url, pane));
+        e.MenuItems.Insert(0, item);
+        e.MenuItems.Insert(1, _env.CreateContextMenuItem("", null, CoreWebView2ContextMenuItemKind.Separator));
     }
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
@@ -297,23 +584,23 @@ public partial class MainWindow : Window
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string path })
-            _core?.Navigate(YouTubeOrigin + path);
+            ActiveCore?.Navigate(YouTubeOrigin + path);
     }
 
-    private void Back_Click(object sender, RoutedEventArgs e) => _core?.GoBack();
-    private void Forward_Click(object sender, RoutedEventArgs e) => _core?.GoForward();
-    private void Reload_Click(object sender, RoutedEventArgs e) => _core?.Reload();
+    private void Back_Click(object sender, RoutedEventArgs e) => ActiveCore?.GoBack();
+    private void Forward_Click(object sender, RoutedEventArgs e) => ActiveCore?.GoForward();
+    private void Reload_Click(object sender, RoutedEventArgs e) => ActiveCore?.Reload();
 
     private void UpdateNavButtons()
     {
-        BackButton.IsEnabled = _core?.CanGoBack == true;
-        ForwardButton.IsEnabled = _core?.CanGoForward == true;
+        BackButton.IsEnabled = ActiveCore?.CanGoBack == true;
+        ForwardButton.IsEnabled = ActiveCore?.CanGoForward == true;
     }
 
     private void DimWatched_Changed(object sender, RoutedEventArgs e)
     {
         _settings.DimWatched = DimWatchedCheck.IsChecked == true;
-        Post(new { type = "dim", value = _settings.DimWatched });
+        PostAll(new { type = "dim", value = _settings.DimWatched });
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e) =>
@@ -358,7 +645,7 @@ public partial class MainWindow : Window
     private void OpenSearch()
     {
         // 検索結果ページにいるときは今の検索語を入れておく
-        if (Uri.TryCreate(_core?.Source, UriKind.Absolute, out var uri) && uri.AbsolutePath == "/results")
+        if (Uri.TryCreate(ActiveCore?.Source, UriKind.Absolute, out var uri) && uri.AbsolutePath == "/results")
             SearchBox.Text = YouTubeUrl.GetQuery(uri, "search_query") ?? SearchBox.Text;
 
         TitleText.Visibility = Visibility.Hidden;
@@ -386,15 +673,15 @@ public partial class MainWindow : Window
         {
             var query = SearchBox.Text.Trim();
             if (query.Length > 0)
-                _core?.Navigate($"{YouTubeOrigin}/results?search_query={Uri.EscapeDataString(query)}");
+                ActiveCore?.Navigate($"{YouTubeOrigin}/results?search_query={Uri.EscapeDataString(query)}");
             CloseSearch();
-            WebView.Focus();
+            _active?.WebView.Focus();
             e.Handled = true;
         }
         else if (e.Key == Key.Escape)
         {
             CloseSearch();
-            WebView.Focus();
+            _active?.WebView.Focus();
             e.Handled = true;
         }
     }
@@ -417,30 +704,30 @@ public partial class MainWindow : Window
     {
         if (_loggedIn == false)
         {
-            _core?.Navigate("https://accounts.google.com/ServiceLogin?service=youtube&continue=" +
+            ActiveCore?.Navigate("https://accounts.google.com/ServiceLogin?service=youtube&continue=" +
                 Uri.EscapeDataString($"{YouTubeOrigin}/signin?action_handle_signin=true&next=%2Ffeed%2Fsubscriptions"));
             return;
         }
 
         ShowMenu(AccountButton,
-            ("アカウント設定", () => _core?.Navigate($"{YouTubeOrigin}/account")),
-            ("ログアウト", () => _core?.Navigate($"{YouTubeOrigin}/logout")));
+            ("アカウント設定", () => ActiveCore?.Navigate($"{YouTubeOrigin}/account")),
+            ("ログアウト", () => ActiveCore?.Navigate($"{YouTubeOrigin}/logout")));
     }
 
     // ---- 拡張機能 ----
 
     private async void Extensions_Click(object sender, RoutedEventArgs e)
     {
-        if (_core is null) return;
+        if (ActiveCore is not { } core) return;
         var button = (Button)sender;
 
         var items = new List<(string, Action)>();
-        foreach (var ext in await _core.Profile.GetBrowserExtensionsAsync())
+        foreach (var ext in await core.Profile.GetBrowserExtensionsAsync())
         {
             var folder = _settings.Extensions.FirstOrDefault(kv => kv.Value == ext.Id).Key;
             var page = folder is null ? null : GetOptionsPage(folder);
             if (page is not null)
-                items.Add(($"{ext.Name} の設定", () => _core.Navigate($"chrome-extension://{ext.Id}/{page}")));
+                items.Add(($"{ext.Name} の設定", () => ActiveCore?.Navigate($"chrome-extension://{ext.Id}/{page}")));
         }
         items.Add(("拡張機能フォルダを開く", () =>
             Process.Start(new ProcessStartInfo(ExtensionsDir) { UseShellExecute = true })));
@@ -467,15 +754,20 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static void ShowMenu(FrameworkElement target, params (string Label, Action Action)[] items)
+    private static void ShowMenu(FrameworkElement target, params (string Label, Action Action)[] items) =>
+        OpenMenu(target, PlacementMode.Right, items.Select(x => MakeMenuItem(x.Label, x.Action)));
+
+    private static MenuItem MakeMenuItem(string label, Action action, bool isChecked = false)
     {
-        var menu = new ContextMenu { PlacementTarget = target, Placement = PlacementMode.Right };
-        foreach (var (label, action) in items)
-        {
-            var item = new MenuItem { Header = label };
-            item.Click += (_, _) => action();
-            menu.Items.Add(item);
-        }
+        var item = new MenuItem { Header = label, IsChecked = isChecked };
+        item.Click += (_, _) => action();
+        return item;
+    }
+
+    private static void OpenMenu(FrameworkElement target, PlacementMode placement, IEnumerable<Control> items)
+    {
+        var menu = new ContextMenu { PlacementTarget = target, Placement = placement };
+        foreach (var item in items) menu.Items.Add(item);
         menu.IsOpen = true;
     }
 
@@ -517,22 +809,34 @@ public partial class MainWindow : Window
         MaximizeButton.Content = maximized ? "" : "";
         MaximizeButton.ToolTip = maximized ? "元に戻す" : "最大化";
         // 最大化中と全画面中はサイズ変更用のすき間が不要
-        WebView.Margin = maximized || _isFullScreen ? new Thickness(0) : _webViewMargin;
+        PaneHost.Margin = maximized || _isFullScreen ? new Thickness(0) : _paneHostMargin;
     }
 
-    private void SetFullScreen(bool on)
+    /// <summary>pane を全画面にする（null で解除）。全画面中はその画面だけをモニター全体に出す。</summary>
+    private void SetFullScreen(VideoPane? pane)
     {
-        if (on == _isFullScreen) return;
+        var on = pane is not null;
+        if (on == _isFullScreen)
+        {
+            if (on && _fullScreenPane != pane)
+            {
+                _fullScreenPane = pane;
+                ApplyLayout();
+            }
+            return;
+        }
 
         if (on)
         {
             if (NativeMethods.GetMonitorRects(Hwnd) is not (var monitor, _)) return;
             _isFullScreen = true;
+            _fullScreenPane = pane;
             _stateBeforeFullScreen = WindowState;
             _boundsBeforeFullScreen = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
 
             TitleBar.Visibility = Visibility.Collapsed;
             Sidebar.Visibility = Visibility.Collapsed;
+            ApplyLayout();
             NativeMethods.SetRoundCorners(Hwnd, false);
             ResizeMode = ResizeMode.NoResize;
             WindowState = WindowState.Normal;
@@ -549,6 +853,7 @@ public partial class MainWindow : Window
         else
         {
             _isFullScreen = false;
+            _fullScreenPane = null;
             ResizeMode = ResizeMode.CanResize;
             Left = _boundsBeforeFullScreen.Left;
             Top = _boundsBeforeFullScreen.Top;
@@ -558,6 +863,7 @@ public partial class MainWindow : Window
             NativeMethods.SetRoundCorners(Hwnd, true);
             TitleBar.Visibility = Visibility.Visible;
             Sidebar.Visibility = Visibility.Visible;
+            ApplyLayout();
         }
         UpdateWindowStateVisuals();
     }

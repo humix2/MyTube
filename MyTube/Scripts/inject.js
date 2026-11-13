@@ -888,6 +888,10 @@
     post({ type: 'openSearch' });
   }, true);
 
+  // 分割画面で、クリックした（フォーカスが来た）画面をアプリ側で「選択中」にする
+  window.addEventListener('pointerdown', () => post({ type: 'activate' }), true);
+  window.addEventListener('focus', () => post({ type: 'activate' }));
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', setup, { once: true });
   } else {
