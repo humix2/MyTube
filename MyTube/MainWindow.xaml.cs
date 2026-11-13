@@ -34,6 +34,8 @@ public partial class MainWindow : Window
     private VideoPane? _active;
     private PaneLayout _layout = PaneLayout.Single;
     private bool _layoutBusy;
+    /// <summary>音を出している画面（null ならすべて消音）。選択中の画面とは別で、切り替えるまで変わらない。</summary>
+    private VideoPane? _audioPane;
 
     /// <summary>選択中の画面。左メニュー・検索・戻る/進むはこの画面に効く。</summary>
     private CoreWebView2? ActiveCore => _active?.Core;
@@ -145,7 +147,9 @@ public partial class MainWindow : Window
         var pane = new VideoPane((Style)FindResource("ToolButton"));
         pane.ActivateRequested += (_, _) => SetActivePane(pane, focus: true);
         pane.CloseRequested += (_, _) => ClosePane(pane);
+        pane.AudioRequested += (_, _) => SetAudioPane(_audioPane == pane ? null : pane);
         pane.MakeMainRequested += (_, _) => MovePaneToMain(pane);
+        pane.MonitorFullScreenRequested += (_, _) => { if (pane.IsVideoFilled) SetFullScreen(pane); };
         pane.WebView.GotFocus += (_, _) => SetActivePane(pane, focus: false);
         _panes.Add(pane);
         PaneHost.Children.Add(pane);
@@ -194,14 +198,25 @@ public partial class MainWindow : Window
             pane.SetTitle(core.DocumentTitle?.Replace(" - YouTube", "").Trim() ?? "");
             if (pane == _active) UpdateTitle();
         };
+        // YouTube の全画面：1 画面のときはモニター全体に広げる。
+        // 分割中はウィンドウを広げない。WebView2 は全画面の動画をその枠いっぱいに出すので、
+        // 枠ごとに最大化した状態で並べられる（見出しのボタンでモニター全体にもできる）
         core.ContainsFullScreenElementChanged += (_, _) =>
         {
-            if (core.ContainsFullScreenElement) SetFullScreen(pane);
-            else if (_fullScreenPane == pane) SetFullScreen(null);
+            if (core.ContainsFullScreenElement)
+            {
+                if (_panes.Count == 1) SetFullScreen(pane);
+                else UpdatePaneChrome();
+            }
+            else
+            {
+                if (_fullScreenPane == pane) SetFullScreen(null);
+                UpdatePaneChrome();
+            }
         };
 
         if (activate || _active is null) SetActivePane(pane, focus: activate);
-        ApplyAudioFocus();
+        ApplyAudio(); // 新しい画面は消音で始まる（音は今の画面のまま）
         core.Navigate(url);
         return pane;
     }
@@ -213,6 +228,7 @@ public partial class MainWindow : Window
         PaneHost.Children.Remove(pane);
         pane.WebView.Dispose();
         if (_active == pane && _panes.Count > 0) SetActivePane(_panes[0], focus: false);
+        if (_audioPane == pane) SetAudioPane(_active); // 音を出していた画面を閉じたら、選択中の画面の音にする
     }
 
     private void ClosePane(VideoPane pane)
@@ -221,6 +237,14 @@ public partial class MainWindow : Window
         RemovePane(pane);
         _layout = PaneLayoutDef.DefaultFor(_panes.Count);
         ApplyLayout();
+        PromoteSingleFullScreen();
+    }
+
+    /// <summary>1 画面に戻ったとき、枠いっぱいに最大化していた動画はいつも通りモニター全体に広げる。</summary>
+    private void PromoteSingleFullScreen()
+    {
+        if (_panes.Count == 1 && _panes[0].IsVideoFilled && !_isFullScreen)
+            SetFullScreen(_panes[0]);
     }
 
     /// <summary>「大1＋小N」の並べ方で、この画面を大きい枠（0 番目）に移す。</summary>
@@ -266,6 +290,7 @@ public partial class MainWindow : Window
 
             _layout = layout;
             ApplyLayout();
+            PromoteSingleFullScreen();
 
             while (_panes.Count < target)
             {
@@ -292,6 +317,9 @@ public partial class MainWindow : Window
             fs.SetChrome(split: false, active: true, canMakeMain: false);
             return;
         }
+
+        // 1 画面のときは見出し（音声ボタン）が出ないので、必ず音を出す
+        if (_panes.Count == 1 && _audioPane != _panes[0]) SetAudioPane(_panes[0]);
 
         var def = PaneLayoutDef.Get(_layout);
         foreach (var w in def.Columns)
@@ -332,7 +360,6 @@ public partial class MainWindow : Window
         {
             _active = pane;
             UpdatePaneChrome();
-            ApplyAudioFocus();
             UpdateTitle();
             UpdateNavButtons();
             UpdateAutoCollapse();
@@ -340,13 +367,18 @@ public partial class MainWindow : Window
         if (focus) pane.WebView.Focus();
     }
 
-    /// <summary>「音は選択中の画面だけ」のときは、選択中の画面以外を消音にする。</summary>
-    private void ApplyAudioFocus()
+    /// <summary>音を出す画面を pane だけにする（null ならすべて消音）。</summary>
+    private void SetAudioPane(VideoPane? pane)
     {
-        if (!_settings.AudioFollowsActive) return;
+        _audioPane = pane;
+        ApplyAudio();
+    }
+
+    private void ApplyAudio()
+    {
         foreach (var p in _panes)
         {
-            if (p.Core is { } core) core.IsMuted = p != _active;
+            if (p.Core is { } core) core.IsMuted = p != _audioPane;
         }
     }
 
@@ -358,18 +390,12 @@ public partial class MainWindow : Window
             var layout = def.Layout;
             items.Add(MakeMenuItem(def.Label, () => _ = SetLayoutAsync(layout), isChecked: layout == _layout));
         }
-        items.Add(new Separator());
-        items.Add(MakeMenuItem("音は選択中の画面だけ出す", () =>
-        {
-            _settings.AudioFollowsActive = !_settings.AudioFollowsActive;
-            ApplyAudioFocus();
-        }, isChecked: _settings.AudioFollowsActive));
         OpenMenu((FrameworkElement)sender, PlacementMode.Bottom, items);
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
-        // Ctrl+1〜4 で画面を選ぶ
+        // Ctrl+1〜4 で画面を選ぶ。選択中の画面の番号をもう一度押すと、その画面の音に切り替える
         if (Keyboard.Modifiers == ModifierKeys.Control)
         {
             var index = e.Key switch
@@ -380,6 +406,7 @@ public partial class MainWindow : Window
             };
             if (index >= 0 && index < _panes.Count && _panes[index].Visibility == Visibility.Visible)
             {
+                if (_panes[index] == _active) SetAudioPane(_active);
                 SetActivePane(_panes[index], focus: true);
                 e.Handled = true;
                 return;

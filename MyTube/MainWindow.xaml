@@ -151,7 +151,7 @@
                 <Button Style="{StaticResource ToolButton}" Content="&#xE72C;"
                         ToolTip="再読み込み (F5)" Click="Reload_Click" />
                 <Button Style="{StaticResource ToolButton}" Content="&#xE8A9;" Margin="8,0,0,0"
-                        ToolTip="画面分割（Ctrl+1〜4 で画面を選ぶ）" Click="Layout_Click" />
+                        ToolTip="画面分割（Ctrl+1〜4 で画面を選ぶ。同じ番号をもう一度で、その画面の音に切り替え）" Click="Layout_Click" />
             </StackPanel>
 
             <Grid Grid.Column="1" Margin="12,0">

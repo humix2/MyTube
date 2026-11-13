@@ -16,9 +16,6 @@ public sealed class AppSettings
     /// <summary>ライブ配信のチャットを動画の上に流す。</summary>
     public bool ShowChatComments { get; set; } = true;
 
-    /// <summary>分割画面で、音は選択中の画面だけ出す（ほかの画面は消音）。</summary>
-    public bool AudioFollowsActive { get; set; } = true;
-
     public string StartUrl { get; set; } = "https://www.youtube.com/feed/subscriptions";
 
     /// <summary>登録チャンネル新着でまとめて表示するチャンネル（"/@handle" → 表示名）。</summary>

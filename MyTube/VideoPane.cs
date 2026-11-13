@@ -22,6 +22,7 @@ public sealed class VideoPane : Border
     private readonly TextBlock _title;
     private readonly Button _muteButton;
     private readonly Button _mainButton;
+    private readonly Button _screenButton;
     private readonly Button _closeButton;
 
     public WebView2 WebView { get; }
@@ -31,7 +32,11 @@ public sealed class VideoPane : Border
     /// <summary>見出しをクリックした。</summary>
     public event EventHandler? ActivateRequested;
     public event EventHandler? CloseRequested;
+    /// <summary>音声ボタンを押した（音を出す画面の切り替え）。</summary>
+    public event EventHandler? AudioRequested;
     public event EventHandler? MakeMainRequested;
+    /// <summary>枠の中で最大化している動画を、モニター全体に広げる。</summary>
+    public event EventHandler? MonitorFullScreenRequested;
 
     public VideoPane(Style buttonStyle)
     {
@@ -44,18 +49,21 @@ public sealed class VideoPane : Border
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
-        _muteButton = MakeButton(buttonStyle, "", "消音", (_, _) => ToggleMute());
-        _mainButton = MakeButton(buttonStyle, "", "大きい枠に移す", (_, _) => MakeMainRequested?.Invoke(this, EventArgs.Empty));
+        _muteButton = MakeButton(buttonStyle, "", "", (_, _) => AudioRequested?.Invoke(this, EventArgs.Empty));
+        _mainButton = MakeButton(buttonStyle, "", "大きい枠と入れ替える", (_, _) => MakeMainRequested?.Invoke(this, EventArgs.Empty));
+        _screenButton = MakeButton(buttonStyle, "", "モニター全体に表示（Esc で戻る）",
+            (_, _) => MonitorFullScreenRequested?.Invoke(this, EventArgs.Empty));
         _closeButton = MakeButton(buttonStyle, "", "この画面を閉じる", (_, _) => CloseRequested?.Invoke(this, EventArgs.Empty));
         _closeButton.FontSize = 10;
 
         var headerGrid = new Grid();
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        for (var i = 0; i < 3; i++) headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        for (var i = 0; i < 4; i++) headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         headerGrid.Children.Add(_title);
         AddAt(headerGrid, _muteButton, 1);
         AddAt(headerGrid, _mainButton, 2);
-        AddAt(headerGrid, _closeButton, 3);
+        AddAt(headerGrid, _screenButton, 3);
+        AddAt(headerGrid, _closeButton, 4);
 
         _header = new Border { Height = 28, Background = Brushes.Transparent, Child = headerGrid };
         // ボタンはクリックを自分で受け取るので、ここに来るのは見出しの空いている所を押したときだけ
@@ -72,6 +80,9 @@ public sealed class VideoPane : Border
         BorderBrush = InactiveBorder;
         SetChrome(split: false, active: true, canMakeMain: false);
     }
+
+    /// <summary>YouTube の全画面（分割中は枠いっぱいの表示）になっている。</summary>
+    public bool IsVideoFilled => Core?.ContainsFullScreenElement == true;
 
     public void Attach(CoreWebView2 core)
     {
@@ -98,19 +109,17 @@ public sealed class VideoPane : Border
         BorderBrush = active ? ActiveBorder : InactiveBorder;
         _title.Foreground = active ? ActiveText : InactiveText;
         _mainButton.Visibility = canMakeMain ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void ToggleMute()
-    {
-        if (Core is not null) Core.IsMuted = !Core.IsMuted;
+        _screenButton.Visibility = split && IsVideoFilled ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateMuteButton()
     {
         var muted = Core?.IsMuted == true;
         _muteButton.Content = muted ? "" : "";
-        _muteButton.ToolTip = muted ? "消音を解除" : "消音";
-        _muteButton.Opacity = muted ? 0.6 : 1;
+        _muteButton.ToolTip = muted
+            ? "この画面の音を出す（Ctrl+番号を2回押しても切り替え）"
+            : "音を出している画面（押すとすべて消音）";
+        _muteButton.Foreground = muted ? InactiveText : ActiveBorder;
     }
 
     private static Button MakeButton(Style style, string icon, string tip, RoutedEventHandler onClick)
