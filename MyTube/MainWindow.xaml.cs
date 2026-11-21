@@ -72,6 +72,8 @@ public partial class MainWindow : Window
 
         SourceInitialized += OnSourceInitialized;
         StateChanged += (_, _) => UpdateWindowStateVisuals();
+        // 最大化したまま起動したときや別のモニターへ移ったときも、はみ出し幅を測り直す
+        SizeChanged += (_, _) => { if (WindowState == WindowState.Maximized) UpdateWindowStateVisuals(); };
         Loaded += async (_, _) => await InitializeAsync();
         Closing += (_, _) => SaveSettings();
     }
@@ -479,6 +481,17 @@ public partial class MainWindow : Window
                     SaveSettings();
                 }
                 break;
+            case "gesture":
+                switch (GetString(root, "action"))
+                {
+                    case "back" when pane.Core?.CanGoBack == true:
+                        pane.Core.GoBack();
+                        break;
+                    case "forward" when pane.Core?.CanGoForward == true:
+                        pane.Core.GoForward();
+                        break;
+                }
+                break;
             case "chatComments" when GetBool(root, "value") is { } on:
                 _settings.ShowChatComments = on;
                 SaveSettings();
@@ -837,6 +850,23 @@ public partial class MainWindow : Window
         MaximizeButton.ToolTip = maximized ? "元に戻す" : "最大化";
         // 最大化中と全画面中はサイズ変更用のすき間が不要
         PaneHost.Margin = maximized || _isFullScreen ? new Thickness(0) : _paneHostMargin;
+        // 枠を自前で描いているウィンドウは、最大化すると周りが画面の外へはみ出す。
+        // そのままだとタイトルバーの上側が切れてボタンが上に寄って見えるので、はみ出す分だけ内側へずらす。
+        RootGrid.Margin = maximized && !_isFullScreen ? MaximizedOverhang() : new Thickness(0);
+    }
+
+    /// <summary>最大化中に、ウィンドウが作業領域の外へはみ出している幅（DIP）。</summary>
+    private Thickness MaximizedOverhang()
+    {
+        if (Hwnd == IntPtr.Zero || !NativeMethods.GetWindowRect(Hwnd, out var win) ||
+            NativeMethods.GetMonitorRects(Hwnd) is not (_, var work))
+            return new Thickness(0);
+        var scale = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice.M11 ?? 1.0;
+        return new Thickness(
+            Math.Max(0, work.Left - win.Left) * scale,
+            Math.Max(0, work.Top - win.Top) * scale,
+            Math.Max(0, win.Right - work.Right) * scale,
+            Math.Max(0, win.Bottom - work.Bottom) * scale);
     }
 
     /// <summary>pane を全画面にする（null で解除）。全画面中はその画面だけをモニター全体に出す。</summary>
