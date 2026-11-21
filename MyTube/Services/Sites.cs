@@ -55,6 +55,13 @@ public static class Sites
         new("hulu", "Hulu", "H", "https://www.hulu.jp/favicon.ico",
             ["hulu.jp"],
             [new("トップ", Home, "https://www.hulu.jp/")]),
+        new("twitch", "Twitch", "T", "https://www.twitch.tv/favicon.ico",
+            ["twitch.tv"],
+            [
+                new("ホーム", Home, "https://www.twitch.tv/"),
+                new("フォロー中", "", "https://www.twitch.tv/directory/following"),
+                new("ブラウズ", "", "https://www.twitch.tv/directory"),
+            ]),
     ];
 
     /// <summary>uri がどのサイトのページか（どれでもなければ null）。</summary>

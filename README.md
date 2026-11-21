@@ -12,6 +12,7 @@ Windows アプリ（C# / WPF / WebView2）。
 | ニコニコ動画 | トップ・ランキング |
 | TVer | ホーム・マイページ・リアルタイム |
 | Netflix / Disney+ / Prime Video / Hulu | トップ |
+| Twitch | ホーム・フォロー中・ブラウズ |
 
 - 有料配信の DRM（Widevine・PlayReady）にも対応しているので、Netflix などの動画も再生できる
 - 上の一覧にないサイトのリンクは既定のブラウザで開く（サイトの一覧は `MyTube/Services/Sites.cs`）

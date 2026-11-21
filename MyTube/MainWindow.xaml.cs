@@ -904,10 +904,12 @@ public partial class MainWindow : Window
             if (!File.Exists(path))
             {
                 using var response = await IconClient.GetAsync(site.FaviconUrl);
-                if (!response.IsSuccessStatusCode ||
-                    response.Content.Headers.ContentType?.MediaType?.StartsWith("image/") != true)
-                    return;
+                if (!response.IsSuccessStatusCode) return;
                 var bytes = await response.Content.ReadAsByteArrayAsync();
+                // 画像の種類を正しく名乗らないサイト（Twitch など）もあるので、実際に画像として読めるかで確かめる。
+                // 読めなければ（HTML のページが返ってきたなど）保存しない
+                using (var check = new MemoryStream(bytes))
+                    BitmapDecoder.Create(check, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
                 Directory.CreateDirectory(IconsDir);
                 await File.WriteAllBytesAsync(path, bytes);
             }
