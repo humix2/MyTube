@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private readonly WatchHistoryStore _history;
     private readonly string _injectScript = LoadScript("inject.js"); // YouTube 用
     private readonly string _commonScript = LoadScript("common.js"); // どのサイトでも
+    private readonly string _sitesScript = LoadScript("sites.js"); // YouTube 以外のサイトの見た目の調整
     private CoreWebView2Environment? _env;
     private bool _extensionsLoaded;
 
@@ -193,6 +194,7 @@ public partial class MainWindow : Window
             await LoadExtensionsAsync(core);
         }
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_commonScript);
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(_sitesScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_injectScript);
 
         core.WebMessageReceived += (_, e) => OnWebMessageReceived(pane, e);
