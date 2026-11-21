@@ -16,13 +16,15 @@ public static partial class YouTubeUrl
 
     /// <summary>
     /// アプリの中で開いてよいページか。アドレスバーがなく偽のページを見分けられないので、
-    /// YouTube とログインに使う Google のページだけにする（それ以外は既定のブラウザで開く）。
+    /// YouTube とログインに使う Google のページ、<see cref="Sites"/> に並べた動画サイトだけにする
+    /// （それ以外は既定のブラウザで開く）。
     /// </summary>
     public static bool IsAllowedInApp(Uri uri)
     {
         if (uri.Scheme == "chrome-extension" || uri.AbsoluteUri == "about:blank") return true;
         if (uri.Scheme is not ("https" or "http")) return false;
         if (IsYouTube(uri)) return true; // http でも YouTube 側で https に切り替わる
+        if (Sites.IsOtherSite(uri)) return true; // ニコニコ・TVer など他の動画サイト（同じく https に切り替わる）
         if (uri.Scheme != "https") return false;
         var host = uri.Host;
         // ログインの途中で accounts.google.co.jp などの国別のドメインも経由する

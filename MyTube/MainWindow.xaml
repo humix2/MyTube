@@ -13,8 +13,6 @@
     <Window.Resources>
         <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
 
-        <!-- 左メニューを畳んだときに文字を隠す（コードから書き換える） -->
-        <Visibility x:Key="LabelVisibility">Visible</Visibility>
 
         <Style x:Key="NavButton" TargetType="Button">
             <Setter Property="Foreground" Value="#F1F1F1" />
@@ -119,7 +117,6 @@
         <Style x:Key="NavLabel" TargetType="TextBlock">
             <Setter Property="Margin" Value="14,0,0,0" />
             <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Visibility" Value="{DynamicResource LabelVisibility}" />
         </Style>
     </Window.Resources>
 
@@ -191,21 +188,30 @@
             </StackPanel>
         </Grid>
 
-        <Border x:Name="Sidebar" Grid.Row="1" Width="200" Padding="8,0,8,8" Background="#0F0F0F"
+        <!-- 左メニュー。左端の帯でサイトを選び、その右にサイトごとの項目を出す -->
+        <DockPanel x:Name="SideArea" Grid.Row="1">
+        <Border DockPanel.Dock="Left" Width="48" Background="#0F0F0F" BorderBrush="#272727"
+                BorderThickness="0,0,1,0">
+            <StackPanel x:Name="SiteBar" Margin="0,2,0,0" />
+        </Border>
+        <Border x:Name="Sidebar" Width="200" Padding="8,0,8,8" Background="#0F0F0F"
                 ClipToBounds="True">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Bottom">
                     <Border Height="1" Background="#3F3F3F" Margin="4,8" />
-                    <CheckBox x:Name="DimWatchedCheck" Content="視聴済みを薄く表示" Foreground="#AAAAAA"
-                              Margin="10,4" Visibility="{DynamicResource LabelVisibility}"
-                              Checked="DimWatched_Changed" Unchecked="DimWatched_Changed" />
-                    <Button x:Name="AccountButton" Style="{StaticResource NavButton}" Click="Account_Click"
-                            ToolTip="アカウント">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Style="{StaticResource NavIcon}" Text="&#xE77B;" />
-                            <TextBlock x:Name="AccountLabel" Style="{StaticResource NavLabel}" Text="アカウント" />
-                        </StackPanel>
-                    </Button>
+                    <!-- YouTube を選んでいるときだけ出す -->
+                    <StackPanel x:Name="YouTubeBottom">
+                        <CheckBox x:Name="DimWatchedCheck" Content="視聴済みを薄く表示" Foreground="#AAAAAA"
+                                  Margin="10,4"
+                                  Checked="DimWatched_Changed" Unchecked="DimWatched_Changed" />
+                        <Button x:Name="AccountButton" Style="{StaticResource NavButton}" Click="Account_Click"
+                                ToolTip="アカウント">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource NavIcon}" Text="&#xE77B;" />
+                                <TextBlock x:Name="AccountLabel" Style="{StaticResource NavLabel}" Text="アカウント" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
                     <Button Style="{StaticResource NavButton}" Click="Extensions_Click" ToolTip="拡張機能の設定">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Style="{StaticResource NavIcon}" Text="&#xEA86;" />
@@ -221,7 +227,10 @@
                     </Button>
                 </StackPanel>
 
-                <StackPanel>
+                <Grid>
+                <!-- YouTube 以外のサイトの項目（コードで作る） -->
+                <StackPanel x:Name="SiteCommands" Visibility="Collapsed" />
+                <StackPanel x:Name="YouTubeCommands">
                     <Button Style="{StaticResource NavButton}" Click="OpenSearch_Click" ToolTip="検索 ( / )">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Style="{StaticResource NavIcon}" Text="&#xE721;" />
@@ -290,12 +299,26 @@
                         </StackPanel>
                     </Button>
                 </StackPanel>
+                </Grid>
             </DockPanel>
         </Border>
+        </DockPanel>
 
         <!-- 動画の画面を並べる所（分割画面）。画面はコードから追加する。
              右と下を少し空けて、そこでウィンドウのサイズ変更ができるようにする
              （WebView2 の上ではサイズ変更のカーソルが出ないため） -->
         <Grid x:Name="PaneHost" Grid.Row="1" Grid.Column="1" Margin="0,0,5,5" />
+
+        <!-- 左メニューを畳んでいるとき、帯のアイコンにマウスを乗せると出る項目の一覧。
+             WebView2 の上に重ねるには別ウィンドウ（Popup）にする必要がある。中身（Sidebar）はコードで出し入れする -->
+        <Popup x:Name="Flyout" Placement="Right" HorizontalOffset="4" VerticalOffset="-6" StaysOpen="True"
+               AllowsTransparency="True" PopupAnimation="Fade">
+            <Border x:Name="FlyoutPanel" Background="#0F0F0F" BorderBrush="#3F3F3F" BorderThickness="1"
+                    CornerRadius="8" Padding="0,6,0,0" Margin="0,0,8,8">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="8" ShadowDepth="2" Opacity="0.5" />
+                </Border.Effect>
+            </Border>
+        </Popup>
     </Grid>
 </Window>

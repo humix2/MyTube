@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
@@ -6,7 +7,9 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using MyTube.Services;
@@ -25,7 +28,8 @@ public partial class MainWindow : Window
 
     private readonly AppSettings _settings;
     private readonly WatchHistoryStore _history;
-    private readonly string _injectScript = LoadInjectScript();
+    private readonly string _injectScript = LoadScript("inject.js"); // YouTube 用
+    private readonly string _commonScript = LoadScript("common.js"); // どのサイトでも
     private CoreWebView2Environment? _env;
     private bool _extensionsLoaded;
 
@@ -49,7 +53,6 @@ public partial class MainWindow : Window
 
     // 左メニュー
     private const double SidebarExpandedWidth = 200;
-    private const double SidebarCollapsedWidth = 56;
     private bool _sidebarCollapsed;
     private bool _autoCollapsed; // 動画を開いたので自動で畳んだ
 
@@ -68,6 +71,8 @@ public partial class MainWindow : Window
         _paneHostMargin = PaneHost.Margin;
         RestoreWindowBounds();
         DimWatchedCheck.IsChecked = _settings.DimWatched;
+        _flyoutTimer.Tick += FlyoutTimer_Tick;
+        BuildSiteBar();
         SetSidebarCollapsed(_settings.SidebarCollapsed, animate: false);
 
         SourceInitialized += OnSourceInitialized;
@@ -97,10 +102,10 @@ public partial class MainWindow : Window
             Close();
     }
 
-    private static string LoadInjectScript()
+    private static string LoadScript(string name)
     {
-        using var stream = typeof(MainWindow).Assembly.GetManifestResourceStream("MyTube.inject.js")
-            ?? throw new InvalidOperationException("inject.js が見つかりません");
+        using var stream = typeof(MainWindow).Assembly.GetManifestResourceStream("MyTube." + name)
+            ?? throw new InvalidOperationException(name + " が見つかりません");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }
@@ -187,6 +192,7 @@ public partial class MainWindow : Window
             _extensionsLoaded = true;
             await LoadExtensionsAsync(core);
         }
+        await core.AddScriptToExecuteOnDocumentCreatedAsync(_commonScript);
         await core.AddScriptToExecuteOnDocumentCreatedAsync(_injectScript);
 
         core.WebMessageReceived += (_, e) => OnWebMessageReceived(pane, e);
@@ -365,6 +371,7 @@ public partial class MainWindow : Window
             UpdateTitle();
             UpdateNavButtons();
             UpdateAutoCollapse();
+            SyncSiteToActivePane();
         }
         if (focus) pane.WebView.Focus();
     }
@@ -436,7 +443,9 @@ public partial class MainWindow : Window
 
     private void OnWebMessageReceived(VideoPane pane, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source) || !YouTubeUrl.IsYouTube(source)) return;
+        if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source)) return;
+        var fromYouTube = YouTubeUrl.IsYouTube(source);
+        if (!fromYouTube && !Sites.IsOtherSite(source)) return;
 
         // ページから来るものなので、想定外の形でも落ちないように中身を確かめてから使う
         JsonDocument doc;
@@ -448,7 +457,11 @@ public partial class MainWindow : Window
         var id = GetString(root, "id");
         if (!YouTubeUrl.IsVideoId(id)) id = null;
 
-        switch (GetString(root, "type"))
+        var type = GetString(root, "type");
+        // 他のサイトから受け付けるのは common.js の操作（画面の選択・ジェスチャー）だけ
+        if (!fromYouTube && type is not ("activate" or "gesture")) return;
+
+        switch (type)
         {
             case "ready":
                 Post(pane, new
@@ -531,6 +544,7 @@ public partial class MainWindow : Window
         {
             UpdateNavButtons();
             UpdateAutoCollapse();
+            SyncSiteToActivePane();
         }
     }
 
@@ -570,7 +584,7 @@ public partial class MainWindow : Window
         // 動画を中クリック・Ctrl+クリックしたら、分割して新しい画面で開く
         else if (YouTubeUrl.GetVideoId(e.Uri) is not null)
             OpenInNewPane(e.Uri, pane);
-        else if (YouTubeUrl.IsYouTube(uri))
+        else if (YouTubeUrl.IsYouTube(uri) || Sites.IsOtherSite(uri))
             pane.Core?.Navigate(e.Uri);
         else
             OpenExternal(e.Uri);
@@ -623,6 +637,7 @@ public partial class MainWindow : Window
 
     private void Nav_Click(object sender, RoutedEventArgs e)
     {
+        CloseFlyout();
         if (sender is Button { Tag: string path })
             ActiveCore?.Navigate(YouTubeOrigin + path);
     }
@@ -643,8 +658,11 @@ public partial class MainWindow : Window
         PostAll(new { type = "dim", value = _settings.DimWatched });
     }
 
-    private void OpenDataFolder_Click(object sender, RoutedEventArgs e) =>
+    private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
+    {
+        CloseFlyout();
         Process.Start(new ProcessStartInfo(DataDir) { UseShellExecute = true });
+    }
 
     private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
     {
@@ -656,31 +674,88 @@ public partial class MainWindow : Window
     private void SetSidebarCollapsed(bool collapsed, bool animate)
     {
         _sidebarCollapsed = collapsed;
-        var to = collapsed ? SidebarCollapsedWidth : SidebarExpandedWidth;
+        CloseFlyout();
+        // 畳んでいるときはマウスを乗せると項目が出るので、サイト名の吹き出しは重なって邪魔になる
+        foreach (var b in _siteButtons) ToolTipService.SetIsEnabled(b, !collapsed);
 
-        // 畳むときは先に文字を消し、開くときは広がりきってから文字を出す
-        if (collapsed) Resources["LabelVisibility"] = Visibility.Collapsed;
-
-        if (!animate)
+        // 畳んだときは項目の列（Sidebar）を浮き出るメニューの中へ移し、アイコンの帯だけを残す
+        if (collapsed)
         {
-            Sidebar.BeginAnimation(WidthProperty, null);
-            Sidebar.Width = to;
-            if (!collapsed) Resources["LabelVisibility"] = Visibility.Visible;
+            if (animate && Sidebar.Parent == SideArea)
+            {
+                var anim = new DoubleAnimation(0, TimeSpan.FromMilliseconds(150))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                };
+                anim.Completed += (_, _) => { if (_sidebarCollapsed) MoveSidebarToFlyout(); };
+                Sidebar.BeginAnimation(WidthProperty, anim);
+            }
+            else
+            {
+                MoveSidebarToFlyout();
+            }
             return;
         }
 
-        var anim = new DoubleAnimation(to, TimeSpan.FromMilliseconds(150))
+        if (Sidebar.Parent != SideArea)
         {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-        };
-        if (!collapsed)
-            anim.Completed += (_, _) => { if (!_sidebarCollapsed) Resources["LabelVisibility"] = Visibility.Visible; };
-        Sidebar.BeginAnimation(WidthProperty, anim);
+            FlyoutPanel.Child = null;
+            Sidebar.Width = animate ? 0 : SidebarExpandedWidth;
+            SideArea.Children.Add(Sidebar);
+        }
+        Sidebar.BeginAnimation(WidthProperty, animate
+            ? new DoubleAnimation(SidebarExpandedWidth, TimeSpan.FromMilliseconds(150))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            }
+            : null);
+        if (!animate) Sidebar.Width = SidebarExpandedWidth;
+    }
+
+    private void MoveSidebarToFlyout()
+    {
+        Sidebar.BeginAnimation(WidthProperty, null);
+        Sidebar.Width = SidebarExpandedWidth;
+        if (Sidebar.Parent == SideArea) SideArea.Children.Remove(Sidebar);
+        FlyoutPanel.Child = Sidebar;
+    }
+
+    // ---- 浮き出るメニュー（畳んでいるとき、帯のアイコンにマウスを乗せると出る） ----
+
+    private readonly DispatcherTimer _flyoutTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private int _openMenus; // 浮き出るメニューから開いた右クリックメニューなど
+
+    private void ShowFlyout(Site site, FrameworkElement anchor)
+    {
+        if (!_sidebarCollapsed || _isFullScreen) return;
+        ShowCommands(site);
+        Flyout.PlacementTarget = anchor;
+        Flyout.IsOpen = true;
+        _flyoutTimer.Start();
+    }
+
+    private void CloseFlyout()
+    {
+        _flyoutTimer.Stop();
+        if (!Flyout.IsOpen) return;
+        Flyout.IsOpen = false;
+        ShowCommands(_site); // 浮き出るメニューで別のサイトを見ていたら、選択中のサイトに戻す
+    }
+
+    /// <summary>マウスが帯からもメニューからも離れたら閉じる。</summary>
+    private void FlyoutTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_openMenus > 0 || SiteBar.IsMouseOver || FlyoutPanel.IsMouseOver) return;
+        CloseFlyout();
     }
 
     // ---- 検索 ----
 
-    private void OpenSearch_Click(object sender, RoutedEventArgs e) => OpenSearch();
+    private void OpenSearch_Click(object sender, RoutedEventArgs e)
+    {
+        CloseFlyout();
+        OpenSearch();
+    }
 
     private void OpenSearch()
     {
@@ -754,6 +829,161 @@ public partial class MainWindow : Window
             ("ログアウト", () => ActiveCore?.Navigate($"{YouTubeOrigin}/logout")));
     }
 
+    // ---- サイトの切り替え（左端の帯） ----
+
+    private static readonly HttpClient IconClient = CreateIconClient();
+
+    private static HttpClient CreateIconClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        // ブラウザらしい名乗りがないと、エラーや HTML のページを返すサイトがある
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+        return client;
+    }
+    private static string IconsDir => Path.Combine(DataDir, "Icons");
+
+    private Site _site = Sites.YouTube;
+    private readonly Dictionary<Site, Border> _siteMarks = [];
+    private readonly List<Button> _siteButtons = [];
+
+    private void BuildSiteBar()
+    {
+        foreach (var site in Sites.All)
+        {
+            var badge = new TextBlock
+            {
+                Text = site.Badge, FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            };
+            var icon = new Image { Width = 20, Height = 20 };
+            RenderOptions.SetBitmapScalingMode(icon, BitmapScalingMode.HighQuality);
+            var face = new Grid { Width = 20, Height = 20 };
+            face.Children.Add(badge);
+            face.Children.Add(icon);
+
+            // 選んでいるサイトの印（左の縦線）
+            var mark = new Border
+            {
+                Width = 3, Height = 18, CornerRadius = new CornerRadius(1.5), Background = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Left, Visibility = Visibility.Hidden,
+            };
+            _siteMarks[site] = mark;
+
+            var button = new Button
+            {
+                Style = (Style)FindResource("NavButton"),
+                Padding = new Thickness(8),
+                Margin = new Thickness(4, 2, 4, 2),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                Content = face,
+                ToolTip = site.Name,
+            };
+            button.Click += (_, _) => SiteButton_Click(site);
+            button.MouseEnter += (_, _) => ShowFlyout(site, button);
+            _siteButtons.Add(button);
+
+            var row = new Grid();
+            row.Children.Add(button);
+            row.Children.Add(mark);
+            SiteBar.Children.Add(row);
+
+            _ = LoadSiteIconAsync(site, icon, badge);
+        }
+        ShowSite(Sites.YouTube);
+    }
+
+    /// <summary>サイトのアイコン（favicon）を読み込む。一度取ったものはデータフォルダに置いて使い回す。</summary>
+    private static async Task LoadSiteIconAsync(Site site, Image image, TextBlock badge)
+    {
+        try
+        {
+            // 取得先の URL を変えたら取り直すよう、ファイル名に URL のハッシュを入れる
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(site.FaviconUrl)))[..8];
+            var path = Path.Combine(IconsDir, $"{site.Key}-{hash}.img");
+            if (!File.Exists(path))
+            {
+                using var response = await IconClient.GetAsync(site.FaviconUrl);
+                if (!response.IsSuccessStatusCode ||
+                    response.Content.Headers.ContentType?.MediaType?.StartsWith("image/") != true)
+                    return;
+                var bytes = await response.Content.ReadAsByteArrayAsync();
+                Directory.CreateDirectory(IconsDir);
+                await File.WriteAllBytesAsync(path, bytes);
+            }
+            using var stream = File.OpenRead(path);
+            var frames = BitmapDecoder.Create(stream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames;
+            // 表示サイズ（高 DPI も考えて 32px 前後）に一番近いものを使う
+            image.Source = frames.OrderBy(f => Math.Abs(f.PixelWidth - 32)).First();
+            badge.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception)
+        {
+            // 取れなければ頭文字のまま
+        }
+    }
+
+    private void SiteButton_Click(Site site)
+    {
+        // 選択中の画面がほかのサイトなら、そのサイトのトップを開く
+        if (Sites.Find(ActiveCore?.Source) != site)
+        {
+            CloseFlyout();
+            var home = site == Sites.YouTube && Sites.Find(_settings.StartUrl) == Sites.YouTube
+                ? _settings.StartUrl : site.HomeUrl;
+            ActiveCore?.Navigate(home);
+        }
+        ShowSite(site);
+    }
+
+    /// <summary>選択中の画面に出ているサイトに、左メニューを合わせる。</summary>
+    private void SyncSiteToActivePane()
+    {
+        if (Sites.Find(ActiveCore?.Source) is { } site) ShowSite(site);
+    }
+
+    private void ShowSite(Site site)
+    {
+        _site = site;
+        foreach (var (s, mark) in _siteMarks)
+            mark.Visibility = s == site ? Visibility.Visible : Visibility.Hidden;
+        ShowCommands(site);
+    }
+
+    /// <summary>項目の列を site 用にする（浮き出るメニューでは、マウスを乗せたサイトのものを出す）。</summary>
+    private void ShowCommands(Site site)
+    {
+        var youtube = site == Sites.YouTube;
+        YouTubeCommands.Visibility = youtube ? Visibility.Visible : Visibility.Collapsed;
+        YouTubeBottom.Visibility = youtube ? Visibility.Visible : Visibility.Collapsed;
+        SiteCommands.Visibility = youtube ? Visibility.Collapsed : Visibility.Visible;
+        if (youtube) return;
+
+        SiteCommands.Children.Clear();
+        var title = new TextBlock
+        {
+            Text = site.Name, Foreground = (Brush)new BrushConverter().ConvertFrom("#AAAAAA")!, FontSize = 12,
+            Margin = new Thickness(10, 10, 0, 6),
+        };
+        SiteCommands.Children.Add(title);
+        foreach (var command in site.Commands)
+        {
+            var panel = new StackPanel { Orientation = Orientation.Horizontal };
+            panel.Children.Add(new TextBlock { Style = (Style)FindResource("NavIcon"), Text = command.Icon });
+            panel.Children.Add(new TextBlock { Style = (Style)FindResource("NavLabel"), Text = command.Label });
+            var button = new Button
+            {
+                Style = (Style)FindResource("NavButton"), Content = panel, ToolTip = command.Label,
+            };
+            button.Click += (_, _) =>
+            {
+                CloseFlyout();
+                ActiveCore?.Navigate(command.Url);
+            };
+            SiteCommands.Children.Add(button);
+        }
+    }
+
     // ---- 拡張機能 ----
 
     private async void Extensions_Click(object sender, RoutedEventArgs e)
@@ -794,7 +1024,7 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static void ShowMenu(FrameworkElement target, params (string Label, Action Action)[] items) =>
+    private void ShowMenu(FrameworkElement target, params (string Label, Action Action)[] items) =>
         OpenMenu(target, PlacementMode.Right, items.Select(x => MakeMenuItem(x.Label, x.Action)));
 
     private static MenuItem MakeMenuItem(string label, Action action, bool isChecked = false)
@@ -804,10 +1034,13 @@ public partial class MainWindow : Window
         return item;
     }
 
-    private static void OpenMenu(FrameworkElement target, PlacementMode placement, IEnumerable<Control> items)
+    private void OpenMenu(FrameworkElement target, PlacementMode placement, IEnumerable<Control> items)
     {
         var menu = new ContextMenu { PlacementTarget = target, Placement = placement };
         foreach (var item in items) menu.Items.Add(item);
+        // 浮き出るメニューから開いたときは、こちらを閉じるまで浮き出るメニューも閉じない
+        _openMenus++;
+        menu.Closed += (_, _) => _openMenus--;
         menu.IsOpen = true;
     }
 
@@ -892,7 +1125,7 @@ public partial class MainWindow : Window
             _boundsBeforeFullScreen = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
 
             TitleBar.Visibility = Visibility.Collapsed;
-            Sidebar.Visibility = Visibility.Collapsed;
+            SideArea.Visibility = Visibility.Collapsed;
             ApplyLayout();
             NativeMethods.SetRoundCorners(Hwnd, false);
             ResizeMode = ResizeMode.NoResize;
@@ -919,7 +1152,7 @@ public partial class MainWindow : Window
             WindowState = _stateBeforeFullScreen;
             NativeMethods.SetRoundCorners(Hwnd, true);
             TitleBar.Visibility = Visibility.Visible;
-            Sidebar.Visibility = Visibility.Visible;
+            SideArea.Visibility = Visibility.Visible;
             ApplyLayout();
         }
         UpdateWindowStateVisuals();
