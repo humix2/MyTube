@@ -854,12 +854,26 @@
     }).observe(document, { childList: true });
   }
 
+  // 広告ブロック系の拡張機能を検知したときに YouTube が出す「再生が中断されていますか？」の通知を隠す。
+  // 通知の枠は他のお知らせ（「保存しました」など）と使い回されるので、文言を見て隠すかどうか決める。
+  const NOISY_TOASTS = ['再生が中断されていますか', 'Experiencing interruptions'];
+  function hideNoisyToasts() {
+    for (const toast of document.querySelectorAll('ytd-popup-container tp-yt-paper-toast')) {
+      const text = toast.textContent || '';
+      const noisy = NOISY_TOASTS.some((s) => text.includes(s));
+      if (noisy) toast.setAttribute('data-mytube-hidden', '1');
+      else if (toast.getAttribute('data-mytube-hidden') === '1') toast.removeAttribute('data-mytube-hidden');
+    }
+  }
+
   function setup() {
     insertStyle();
     setDim(dim);
     new MutationObserver((records) => {
       // 流しているコメントの出し入れでは見直さない
       if (records.every((r) => r.target.id === 'mytube-chat-overlay')) return;
+      // 通知は一瞬でも見えないよう、まとめて見直すのを待たずにすぐ隠す
+      hideNoisyToasts();
       schedule();
     }).observe(document.documentElement, {
       childList: true,
