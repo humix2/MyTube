@@ -30,7 +30,7 @@ $readme = @"
 MyTube $version
 ================
 
-YouTube を中心に、ニコニコ動画・TVer・Netflix・Disney+・Prime Video・Hulu・Twitch を
+YouTube を中心に、ニコニコ動画・TVer・NHK ONE・Netflix・Disney+・Prime Video・Hulu・Twitch を
 1 つのウィンドウで切り替えたり、画面分割で並べたりして見られる Windows アプリです。
 各サイトをそのまま表示するので、ログインすればそれぞれのアカウントと同期されます。
 詳しい機能: https://github.com/humix2/MyTube

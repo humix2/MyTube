@@ -1096,7 +1096,7 @@ public partial class MainWindow : Window
             button.Click += (_, _) =>
             {
                 CloseFlyout();
-                ActiveCore?.Navigate(command.Url);
+                ActiveCore?.Navigate(command.ResolveUrl());
             };
             SiteCommands.Children.Add(button);
         }

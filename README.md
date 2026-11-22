@@ -11,6 +11,7 @@ Windows アプリ（C# / WPF / WebView2）。
 | YouTube | 検索・登録チャンネル新着・ホーム・後で見る・再生リスト・履歴・チャンネル管理・急上昇（下の「YouTube の機能」も参照） |
 | ニコニコ動画 | トップ・ランキング |
 | TVer | ホーム・マイページ・リアルタイム |
+| NHK ONE | トップ・番組表（今日）・ラジオ |
 | Netflix / Disney+ / Prime Video / Hulu | トップ |
 | Twitch | ホーム・フォロー中・ブラウズ |
 

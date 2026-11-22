@@ -1,7 +1,13 @@
 namespace MyTube.Services;
 
-/// <summary>左メニューのサイトごとの項目（アイコンは Segoe Fluent Icons の文字）。</summary>
-public sealed record SiteCommand(string Label, string Icon, string Url);
+/// <summary>
+/// 左メニューのサイトごとの項目（アイコンは Segoe Fluent Icons の文字）。
+/// Url の {today} は、開くときに今日の日付（yyyyMMdd）に置き換える。
+/// </summary>
+public sealed record SiteCommand(string Label, string Icon, string Url)
+{
+    public string ResolveUrl() => Url.Replace("{today}", DateTime.Now.ToString("yyyyMMdd"));
+}
 
 /// <summary>
 /// アプリで見られる動画サイト。左端の帯にこの順で並ぶ。
@@ -9,7 +15,7 @@ public sealed record SiteCommand(string Label, string Icon, string Url);
 /// </summary>
 public sealed record Site(string Key, string Name, string Badge, string FaviconUrl, string[] Domains, SiteCommand[] Commands)
 {
-    public string HomeUrl => Commands[0].Url;
+    public string HomeUrl => Commands[0].ResolveUrl();
 
     public bool Contains(Uri uri) => Domains.Any(d =>
         uri.Host.Equals(d, StringComparison.OrdinalIgnoreCase) ||
@@ -40,6 +46,15 @@ public static class Sites
                 new("ホーム", Home, "https://tver.jp/"),
                 new("マイページ", "", "https://tver.jp/mypage/fav"),
                 new("リアルタイム", "", "https://tver.jp/live"),
+            ]),
+        // NHK ONE。番組は web.nhk、番組表は nhk.jp、ラジオは nhk.or.jp にある。
+        // ログインは .nhk のドメイン（authn.ac2.nhk など）を経由するので、.nhk はまとめて許可する
+        new("nhk", "NHK ONE", "N", "https://www.web.nhk/favicon.ico",
+            ["nhk", "nhk.jp", "nhk.or.jp"],
+            [
+                new("トップ", Home, "https://www.web.nhk/tv/g1"),
+                new("番組表", "", "https://www.nhk.jp/timetable/440/tv/{today}/"),
+                new("ラジオ", "", "https://www.nhk.or.jp/radio/"),
             ]),
         new("netflix", "Netflix", "N", "https://www.netflix.com/favicon.ico",
             ["netflix.com"],
