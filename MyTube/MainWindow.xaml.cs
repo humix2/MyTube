@@ -42,6 +42,13 @@ public partial class MainWindow : Window
     /// <summary>音を出している画面（null ならすべて消音）。選択中の画面とは別で、切り替えるまで変わらない。</summary>
     private VideoPane? _audioPane;
 
+    /// <summary>小窓。開いている間、その画面は _panes から外れて小窓の中にある。</summary>
+    private PipWindow? _pip;
+    private Rect? _lastPipBounds;
+
+    /// <summary>小窓の画面も含めたすべての画面。</summary>
+    private IEnumerable<VideoPane> AllPanes => _pip is { } pip ? _panes.Append(pip.Pane) : _panes;
+
     /// <summary>選択中の画面。左メニュー・検索・戻る/進むはこの画面に効く。</summary>
     private CoreWebView2? ActiveCore => _active?.Core;
 
@@ -81,7 +88,11 @@ public partial class MainWindow : Window
         // 最大化したまま起動したときや別のモニターへ移ったときも、はみ出し幅を測り直す
         SizeChanged += (_, _) => { if (WindowState == WindowState.Maximized) UpdateWindowStateVisuals(); };
         Loaded += async (_, _) => await InitializeAsync();
-        Closing += (_, _) => SaveSettings();
+        Closing += (_, _) =>
+        {
+            SaveSettings();
+            _pip?.Close();
+        };
     }
 
     private async Task InitializeAsync()
@@ -213,6 +224,7 @@ public partial class MainWindow : Window
         // 枠ごとに最大化した状態で並べられる（見出しのボタンでモニター全体にもできる）
         core.ContainsFullScreenElementChanged += (_, _) =>
         {
+            if (pane == _pip?.Pane) return; // 小窓の中では小窓いっぱいに出すだけ
             if (core.ContainsFullScreenElement)
             {
                 if (_panes.Count == 1) SetFullScreen(pane);
@@ -328,8 +340,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 1 画面のときは見出し（音声ボタン）が出ないので、必ず音を出す
-        if (_panes.Count == 1 && _audioPane != _panes[0]) SetAudioPane(_panes[0]);
+        // 1 画面のときは見出し（音声ボタン）が出ないので、必ず音を出す（小窓があるときは見出しを出す）
+        if (_panes.Count == 1 && _pip is null && _audioPane != _panes[0]) SetAudioPane(_panes[0]);
 
         var def = PaneLayoutDef.Get(_layout);
         foreach (var w in def.Columns)
@@ -357,7 +369,8 @@ public partial class MainWindow : Window
     private void UpdatePaneChrome()
     {
         if (_fullScreenPane is not null) return;
-        var split = _panes.Count > 1;
+        // 小窓があるときは 1 画面でも見出しを出し、音を出す画面を切り替えられるようにする
+        var split = _panes.Count > 1 || _pip is not null;
         var hasMain = PaneLayoutDef.Get(_layout).HasMain;
         for (var i = 0; i < _panes.Count; i++)
             _panes[i].SetChrome(split, active: _panes[i] == _active, canMakeMain: hasMain && i > 0);
@@ -387,7 +400,7 @@ public partial class MainWindow : Window
 
     private void ApplyAudio()
     {
-        foreach (var p in _panes)
+        foreach (var p in AllPanes)
         {
             if (p.Core is { } core) core.IsMuted = p != _audioPane;
         }
@@ -402,6 +415,107 @@ public partial class MainWindow : Window
             items.Add(MakeMenuItem(def.Label, () => _ = SetLayoutAsync(layout), isChecked: layout == _layout));
         }
         OpenMenu((FrameworkElement)sender, PlacementMode.Bottom, items);
+    }
+
+    // ---- 小窓（ピクチャインピクチャ） ----
+
+    private void Pip_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pip is not null) ReturnFromPip();
+        else if (_active is { } pane) OpenPip(pane);
+    }
+
+    /// <summary>pane を WebView2 ごと小窓へ移す。読み込み直さないので、そのまま再生が続く。</summary>
+    private async void OpenPip(VideoPane pane)
+    {
+        if (_pip is not null || _isFullScreen || _layoutBusy || pane.Core is not { } core) return;
+        _layoutBusy = true;
+        try
+        {
+            _panes.Remove(pane);
+            PaneHost.Children.Remove(pane);
+            pane.Visibility = Visibility.Visible;
+            pane.SetChrome(split: false, active: true, canMakeMain: false);
+
+            _pip = new PipWindow(pane, core, (Style)FindResource("ToolButton"), _lastPipBounds ?? DefaultPipBounds());
+            _pip.ReturnRequested += (_, _) => ReturnFromPip();
+            _pip.AudioRequested += (_, _) => SetAudioPane(_audioPane == pane ? null : pane);
+            _pip.Closed += OnPipClosed;
+            _pip.Show();
+            SetAudioPane(pane); // 音は小窓の動画から出す
+            _ = core.ExecuteScriptAsync(PipWindow.FillScript);
+            UpdatePipButton();
+
+            // 元のウィンドウが空になったら、最初のページを開いておく
+            if (_panes.Count == 0)
+            {
+                _layout = PaneLayout.Single;
+                await CreatePaneAsync(_settings.StartUrl, activate: true);
+            }
+            else
+            {
+                _layout = PaneLayoutDef.DefaultFor(_panes.Count);
+                ApplyLayout();
+                SetActivePane(_panes[0], focus: false);
+            }
+        }
+        finally
+        {
+            _layoutBusy = false;
+        }
+    }
+
+    /// <summary>小窓の画面を元のウィンドウへ戻す（分割画面の 1 画面として足す）。</summary>
+    private void ReturnFromPip()
+    {
+        if (_pip is not { } pip || _layoutBusy) return;
+        _lastPipBounds = new Rect(pip.Left, pip.Top, pip.Width, pip.Height);
+        var pane = pip.DetachPane();
+        _pip = null; // 先に外しておくと、閉じたときの後始末（OnPipClosed）で画面を捨てない
+        pip.Close();
+
+        _ = pane.Core?.ExecuteScriptAsync(PipWindow.ExitFillScript);
+        if (_isFullScreen) SetFullScreen(null);
+        // もう 4 画面あるときは、選択中でない最後の画面を閉じて場所を空ける
+        if (_panes.Count >= PaneLayoutDef.MaxPanes) RemovePane(_panes.Last(p => p != _active));
+
+        _panes.Add(pane);
+        PaneHost.Children.Add(pane);
+        _layout = PaneLayoutDef.DefaultFor(_panes.Count);
+        ApplyLayout();
+        SetActivePane(pane, focus: true);
+        SetAudioPane(pane);
+        UpdatePipButton();
+        Activate();
+    }
+
+    /// <summary>小窓を閉じた（× や Alt+F4）。中の動画も閉じる。</summary>
+    private void OnPipClosed(object? sender, EventArgs e)
+    {
+        if (_pip is not { } pip || pip != sender) return; // 元に戻したときは何もしない
+        _lastPipBounds = new Rect(pip.Left, pip.Top, pip.Width, pip.Height);
+        _pip = null;
+        pip.Pane.WebView.Dispose();
+        if (_audioPane == pip.Pane) SetAudioPane(_active);
+        ApplyLayout();
+        UpdatePipButton();
+    }
+
+    private void UpdatePipButton() =>
+        PipButton.ToolTip = _pip is not null
+            ? "小窓の動画を元の画面に戻す"
+            : "選択中の画面を小窓で再生（常に手前・どの仮想デスクトップでも表示）";
+
+    /// <summary>今のモニターの右下に 16:9 で置く。</summary>
+    private Rect DefaultPipBounds()
+    {
+        const double width = 480, height = 270 + 28 + 5; // 動画 + 見出し + 下のすき間
+        const double margin = 16;
+        if (NativeMethods.GetMonitorRects(Hwnd) is not (_, var work))
+            return new Rect(100, 100, width, height);
+        var toDip = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice ?? System.Windows.Media.Matrix.Identity;
+        var bottomRight = toDip.Transform(new Point(work.Right, work.Bottom));
+        return new Rect(bottomRight.X - width - margin, bottomRight.Y - height - margin, width, height);
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
@@ -529,7 +643,7 @@ public partial class MainWindow : Window
     private void PostAll(object message, VideoPane? except = null)
     {
         var json = JsonSerializer.Serialize(message);
-        foreach (var p in _panes)
+        foreach (var p in AllPanes)
         {
             if (p != except) p.Core?.PostWebMessageAsJson(json);
         }

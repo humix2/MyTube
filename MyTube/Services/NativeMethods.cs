@@ -61,6 +61,28 @@ internal static class NativeMethods
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref value, sizeof(int));
     }
 
+    private const int GWL_EXSTYLE = -20;
+    private const long WS_EX_TOOLWINDOW = 0x00000080;
+    private const long WS_EX_APPWINDOW = 0x00040000;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+
+    /// <summary>
+    /// ツールウィンドウにする（タスクバー・Alt+Tab に出ない）。
+    /// 仮想デスクトップはタスクバーに出るウィンドウだけを切り替えの対象にするので、
+    /// ツールウィンドウはどのデスクトップにいても表示されたままになる。
+    /// </summary>
+    public static void SetToolWindow(IntPtr hwnd)
+    {
+        var style = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style));
+    }
+
     public static void SetBorderColor(IntPtr hwnd, byte r, byte g, byte b)
     {
         var value = r | (g << 8) | (b << 16);
