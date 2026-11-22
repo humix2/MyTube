@@ -1,0 +1,225 @@
+<!doctype html>
+<!-- MyTube: 視聴履歴のページ。アプリが https://mytube.example/history として出す（中身は history.json から読む） -->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>視聴履歴</title>
+<style>
+  :root {
+    --bg: #0f0f0f; --panel: #1a1a1a; --hover: #272727; --line: #3f3f3f;
+    --text: #f1f1f1; --sub: #aaaaaa; --dim: #717171; --accent: #3ea6ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 14px/1.5 "Yu Gothic UI", "Segoe UI", sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 24px 48px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  .count { color: var(--sub); font-size: 13px; }
+  .spacer { flex: 1; }
+  .search {
+    width: 240px; max-width: 100%; height: 32px; padding: 0 14px;
+    border: 1px solid var(--line); border-radius: 16px; outline: none;
+    background: #121212; color: var(--text); font: inherit; font-size: 13px;
+  }
+  .search:focus { border-color: var(--accent); }
+  .clear {
+    height: 32px; padding: 0 14px; border: 0; border-radius: 16px; cursor: pointer;
+    background: var(--hover); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .clear:hover { background: #3a3a3a; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px;
+    border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--hover); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .chip:hover { background: #3a3a3a; }
+  .chip[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+  .chip img { width: 16px; height: 16px; }
+
+  h2 { margin: 24px 0 8px; font-size: 15px; font-weight: 600; color: var(--sub); }
+  .list { display: flex; flex-direction: column; gap: 2px; }
+  .item {
+    position: relative; display: flex; gap: 14px; padding: 8px; border-radius: 10px;
+    color: inherit; text-decoration: none;
+  }
+  .item:hover { background: var(--panel); }
+  .thumb {
+    flex: none; width: 168px; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden;
+    background: var(--hover); display: flex; align-items: center; justify-content: center;
+  }
+  .thumb img.photo { width: 100%; height: 100%; object-fit: cover; }
+  .thumb img.icon { width: 32px; height: 32px; opacity: .8; }
+  .body { min-width: 0; flex: 1; padding: 2px 36px 0 0; }
+  .title {
+    margin: 0 0 6px; font-size: 15px; font-weight: 500;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .meta { display: flex; align-items: center; gap: 6px; color: var(--sub); font-size: 12px; }
+  .meta img { width: 14px; height: 14px; }
+  .remove {
+    position: absolute; top: 8px; right: 8px; width: 32px; height: 32px;
+    border: 0; border-radius: 16px; cursor: pointer; display: none;
+    background: transparent; color: var(--sub); font: 14px "Segoe Fluent Icons", "Segoe MDL2 Assets";
+  }
+  .item:hover .remove { display: block; }
+  .remove:hover { background: var(--hover); color: var(--text); }
+
+  .empty { margin-top: 64px; text-align: center; color: var(--sub); }
+  .empty p { margin: 4px 0; }
+  .empty .hint { color: var(--dim); font-size: 13px; }
+
+  @media (max-width: 560px) {
+    main { padding: 16px; }
+    .thumb { width: 120px; }
+    .search { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>視聴履歴</h1>
+    <span class="count" id="count"></span>
+    <span class="spacer"></span>
+    <input class="search" id="search" type="search" placeholder="履歴を検索">
+    <button class="clear" id="clear" type="button">すべて消去</button>
+  </header>
+  <div class="chips" id="chips"></div>
+  <div id="list"></div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const host = window.chrome && window.chrome.webview;
+  const post = (msg) => { if (host) host.postMessage(msg); };
+  const $ = (id) => document.getElementById(id);
+
+  let data = { sites: [], items: [] };
+  let filter = ''; // サイトの Key（空ならすべて）
+
+  const el = (tag, props = {}, children = []) => {
+    const e = Object.assign(document.createElement(tag), props);
+    for (const c of children) if (c) e.append(c);
+    return e;
+  };
+  const siteIcon = (key, cls) => {
+    const img = el('img', { src: `/icon/${encodeURIComponent(key)}`, alt: '', className: cls || '' });
+    img.onerror = () => img.remove();
+    return img;
+  };
+
+  async function load() {
+    try {
+      const res = await fetch('/history.json', { cache: 'no-store' });
+      data = await res.json();
+    } catch {
+      data = { sites: [], items: [] };
+    }
+    // 絞り込んでいたサイトの履歴がなくなったら、すべてに戻す
+    if (filter && !data.items.some((x) => x.site === filter)) filter = '';
+    render();
+  }
+
+  function dayLabel(d) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(d); day.setHours(0, 0, 0, 0);
+    const diff = Math.round((today - day) / 86400000);
+    if (diff === 0) return '今日';
+    if (diff === 1) return '昨日';
+    const w = '日月火水木金土'[day.getDay()];
+    const y = day.getFullYear() === today.getFullYear() ? '' : `${day.getFullYear()}年`;
+    return `${y}${day.getMonth() + 1}月${day.getDate()}日（${w}）`;
+  }
+  const time = (d) => `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+  function render() {
+    const names = Object.fromEntries(data.sites.map((s) => [s.key, s.name]));
+
+    // サイトの絞り込み（履歴があるサイトだけ）
+    const used = data.sites.filter((s) => data.items.some((x) => x.site === s.key));
+    const chips = $('chips');
+    chips.replaceChildren();
+    if (used.length > 1) {
+      const chip = (key, label) => {
+        const b = el('button', { type: 'button', className: 'chip' }, [key ? siteIcon(key) : null, label]);
+        b.setAttribute('aria-pressed', String(filter === key));
+        b.onclick = () => { filter = key; render(); };
+        chips.append(b);
+      };
+      chip('', 'すべて');
+      for (const s of used) chip(s.key, s.name);
+    }
+
+    const q = $('search').value.trim().toLowerCase();
+    const items = data.items.filter((x) =>
+      (!filter || x.site === filter) && (!q || (x.title || '').toLowerCase().includes(q)));
+    $('count').textContent = data.items.length ? `${items.length} 件` : '';
+    $('clear').hidden = data.items.length === 0;
+
+    const list = $('list');
+    list.replaceChildren();
+    if (items.length === 0) {
+      list.append(el('div', { className: 'empty' }, data.items.length
+        ? [el('p', { textContent: '見つかりませんでした' })]
+        : [
+            el('p', { textContent: 'まだ履歴はありません' }),
+            el('p', { className: 'hint', textContent: 'アプリで動画を 30 秒以上再生すると、ここに記録されます' }),
+          ]));
+      return;
+    }
+
+    let group = null;
+    let label = '';
+    for (const x of items) {
+      const d = new Date(x.watchedAt);
+      const l = dayLabel(d);
+      if (l !== label) {
+        label = l;
+        list.append(el('h2', { textContent: l }));
+        group = el('div', { className: 'list' });
+        list.append(group);
+      }
+
+      const thumb = el('div', { className: 'thumb' });
+      if (x.image) {
+        const img = el('img', { src: x.image, alt: '', className: 'photo', loading: 'lazy', referrerPolicy: 'no-referrer' });
+        img.onerror = () => img.replaceWith(siteIcon(x.site, 'icon'));
+        thumb.append(img);
+      } else {
+        thumb.append(siteIcon(x.site, 'icon'));
+      }
+
+      const remove = el('button', { type: 'button', className: 'remove', title: '履歴から削除', textContent: '' });
+      remove.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        post({ type: 'historyRemove', key: x.key });
+      };
+
+      group.append(el('a', { className: 'item', href: x.url }, [
+        thumb,
+        el('div', { className: 'body' }, [
+          el('p', { className: 'title', textContent: x.title || x.url, title: x.title || x.url }),
+          el('div', { className: 'meta' }, [siteIcon(x.site), `${names[x.site] || x.site}・${time(d)}`]),
+        ]),
+        remove,
+      ]));
+    }
+  }
+
+  $('search').addEventListener('input', render);
+  $('clear').addEventListener('click', () => {
+    if (confirm('視聴履歴をすべて消去しますか？')) post({ type: 'historyClear' });
+  });
+  // 履歴が変わったらアプリから知らせが来るので読み直す
+  if (host) host.addEventListener('message', (e) => { if (e.data && e.data.type === 'historyChanged') load(); });
+  load();
+})();
+</script>
+</body>
+</html>

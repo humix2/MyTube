@@ -37,6 +37,7 @@
     <EmbeddedResource Include="Scripts\inject.js" LogicalName="MyTube.inject.js" />
     <EmbeddedResource Include="Scripts\common.js" LogicalName="MyTube.common.js" />
     <EmbeddedResource Include="Scripts\sites.js" LogicalName="MyTube.sites.js" />
+    <EmbeddedResource Include="Scripts\history.html" LogicalName="MyTube.history.html" />
   </ItemGroup>
 
 </Project>

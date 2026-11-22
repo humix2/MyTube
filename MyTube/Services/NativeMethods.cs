@@ -83,6 +83,20 @@ internal static class NativeMethods
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style));
     }
 
+    private const uint ES_CONTINUOUS = 0x80000000;
+    private const uint ES_SYSTEM_REQUIRED = 0x00000001;
+    private const uint ES_DISPLAY_REQUIRED = 0x00000002;
+
+    [DllImport("kernel32.dll")]
+    private static extern uint SetThreadExecutionState(uint flags);
+
+    /// <summary>
+    /// 画面が暗くなる・消える・スリープするのを止める（false で元に戻す）。
+    /// 呼んだスレッドごとの設定なので、いつも同じスレッド（UI スレッド）から呼ぶ。
+    /// </summary>
+    public static void KeepDisplayOn(bool on) =>
+        SetThreadExecutionState(on ? ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED : ES_CONTINUOUS);
+
     public static void SetBorderColor(IntPtr hwnd, byte r, byte g, byte b)
     {
         var value = r | (g << 8) | (b << 16);

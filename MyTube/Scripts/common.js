@@ -1,5 +1,5 @@
 // MyTube: YouTube に限らず、アプリで開くどのサイトにも差し込むスクリプト。
-// サイトの見た目には手を入れず、アプリとしての操作（画面の選択・マウスジェスチャー）だけを受け持つ。
+// サイトの見た目には手を入れず、アプリとしての操作（画面の選択・マウスジェスチャー・視聴履歴の記録）だけを受け持つ。
 (() => {
   'use strict';
   if (window.top !== window) return;
@@ -37,5 +37,41 @@
     suppressMenu = false;
     e.preventDefault();
     e.stopImmediatePropagation();
+  }, true);
+
+  // 視聴履歴：このページで動画（音声）を合わせて 30 秒再生したら、アプリに知らせる。
+  // 動画のページかどうかはアプリ側で URL から見分ける。その後も 5 分ごとに知らせて、見た日時とタイトルを新しくする
+  const WATCH_FIRST = 30;
+  const WATCH_AGAIN = 300;
+  const newWatch = () => ({ url: location.href, played: 0, next: WATCH_FIRST, last: 0 });
+  let watch = newWatch();
+
+  const pageTitle = () => {
+    // Netflix の再生画面はページのタイトルが「Netflix」だけなので、プレーヤーに出ている作品名を使う
+    const netflix = document.querySelector('[data-uia="video-title"]');
+    if (netflix && netflix.textContent.trim()) {
+      return [...netflix.children].map((c) => c.textContent.trim()).filter(Boolean).join(' ') ||
+        netflix.textContent.trim();
+    }
+    return document.title;
+  };
+  const pageImage = () => {
+    const meta = document.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]');
+    return meta ? meta.content : '';
+  };
+
+  // timeupdate は泡立たない（親へ伝わらない）が、捕捉（capture）ならページのどの動画のものも受け取れる
+  document.addEventListener('timeupdate', (e) => {
+    const media = e.target;
+    if (!(media instanceof HTMLMediaElement) || media.paused) return;
+    // 同じページのまま別の動画へ移ったとき（YouTube など）は数え直す
+    if (watch.url !== location.href) watch = newWatch();
+    // 動画がいくつ流れていても二重に数えないよう、イベントの間の実際の経過時間を足す（止まっていた間は足さない）
+    const now = performance.now();
+    if (watch.last && now - watch.last < 2000) watch.played += (now - watch.last) / 1000;
+    watch.last = now;
+    if (watch.played < watch.next) return;
+    watch.next += WATCH_AGAIN;
+    post({ type: 'watched', url: location.href, title: pageTitle(), image: pageImage() });
   }, true);
 })();

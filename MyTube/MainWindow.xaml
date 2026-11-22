@@ -194,7 +194,14 @@
         <DockPanel x:Name="SideArea" Grid.Row="1">
         <Border DockPanel.Dock="Left" Width="48" Background="#0F0F0F" BorderBrush="#272727"
                 BorderThickness="0,0,1,0">
-            <StackPanel x:Name="SiteBar" Margin="0,2,0,0" />
+            <DockPanel>
+                <!-- どのサイトのものもまとめた視聴履歴（アプリで 30 秒以上再生した動画） -->
+                <Button DockPanel.Dock="Bottom" Style="{StaticResource NavButton}" Padding="8" Margin="4,2,4,8"
+                        HorizontalContentAlignment="Center" ToolTip="視聴履歴（すべてのサイト）" Click="History_Click">
+                    <TextBlock Style="{StaticResource NavIcon}" Text="&#xE81C;" />
+                </Button>
+                <StackPanel x:Name="SiteBar" Margin="0,2,0,0" />
+            </DockPanel>
         </Border>
         <Border x:Name="Sidebar" Width="200" Padding="8,0,8,8" Background="#0F0F0F"
                 ClipToBounds="True">

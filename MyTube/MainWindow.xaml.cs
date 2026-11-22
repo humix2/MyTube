@@ -197,6 +197,7 @@ public partial class MainWindow : Window
         core.Settings.AreDevToolsEnabled = false; // 配布用では開発者ツールを開けないようにする
 #endif
         core.PermissionRequested += OnPermissionRequested;
+        AttachAppPages(core);
 
         // 拡張機能はプロファイル（全画面で共通）に入るので、最初の 1 回だけ読み込む
         if (!_extensionsLoaded)
@@ -214,6 +215,7 @@ public partial class MainWindow : Window
         core.ContextMenuRequested += (_, e) => OnContextMenuRequested(pane, e);
         core.SourceChanged += (_, _) => OnSourceChanged(pane);
         core.HistoryChanged += (_, _) => { if (pane == _active) UpdateNavButtons(); };
+        core.IsDocumentPlayingAudioChanged += (_, _) => UpdateKeepDisplayOn();
         core.DocumentTitleChanged += (_, _) =>
         {
             pane.SetTitle(core.DocumentTitle?.Replace(" - YouTube", "").Trim() ?? "");
@@ -249,6 +251,7 @@ public partial class MainWindow : Window
         if (_fullScreenPane == pane) SetFullScreen(null);
         PaneHost.Children.Remove(pane);
         pane.WebView.Dispose();
+        UpdateKeepDisplayOn();
         if (_active == pane && _panes.Count > 0) SetActivePane(_panes[0], focus: false);
         if (_audioPane == pane) SetAudioPane(_active); // 音を出していた画面を閉じたら、選択中の画面の音にする
     }
@@ -406,6 +409,13 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// どれかの画面（小窓も）で音の出る再生をしている間は、放っておいても画面が暗くなったり消えたりしないようにする。
+    /// 消音中の画面も「再生中」に数える（分割画面で音を出していない画面を見ている場合があるため）。
+    /// </summary>
+    private void UpdateKeepDisplayOn() =>
+        NativeMethods.KeepDisplayOn(AllPanes.Any(p => p.Core?.IsDocumentPlayingAudio == true));
+
     private void Layout_Click(object sender, RoutedEventArgs e)
     {
         var items = new List<Control>();
@@ -496,6 +506,7 @@ public partial class MainWindow : Window
         _lastPipBounds = new Rect(pip.Left, pip.Top, pip.Width, pip.Height);
         _pip = null;
         pip.Pane.WebView.Dispose();
+        UpdateKeepDisplayOn();
         if (_audioPane == pip.Pane) SetAudioPane(_active);
         ApplyLayout();
         UpdatePipButton();
@@ -561,7 +572,8 @@ public partial class MainWindow : Window
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out var source)) return;
         var fromYouTube = YouTubeUrl.IsYouTube(source);
-        if (!fromYouTube && !Sites.IsOtherSite(source)) return;
+        var fromAppPage = IsAppPage(source);
+        if (!fromYouTube && !fromAppPage && !Sites.IsOtherSite(source)) return;
 
         // ページから来るものなので、想定外の形でも落ちないように中身を確かめてから使う
         JsonDocument doc;
@@ -570,12 +582,17 @@ public partial class MainWindow : Window
         using var _ = doc;
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object) return;
+        if (fromAppPage)
+        {
+            OnHistoryPageMessage(pane, root);
+            return;
+        }
         var id = GetString(root, "id");
         if (!YouTubeUrl.IsVideoId(id)) id = null;
 
         var type = GetString(root, "type");
-        // 他のサイトから受け付けるのは common.js の操作（画面の選択・ジェスチャー）だけ
-        if (!fromYouTube && type is not ("activate" or "gesture")) return;
+        // 他のサイトから受け付けるのは common.js の操作（画面の選択・ジェスチャー・視聴履歴）だけ
+        if (!fromYouTube && type is not ("activate" or "gesture" or "watched")) return;
 
         switch (type)
         {
@@ -611,15 +628,10 @@ public partial class MainWindow : Window
                 }
                 break;
             case "gesture":
-                switch (GetString(root, "action"))
-                {
-                    case "back" when pane.Core?.CanGoBack == true:
-                        pane.Core.GoBack();
-                        break;
-                    case "forward" when pane.Core?.CanGoForward == true:
-                        pane.Core.GoForward();
-                        break;
-                }
+                HandleGesture(pane, root);
+                break;
+            case "watched":
+                RecordWatched(source, root);
                 break;
             case "chatComments" when GetBool(root, "value") is { } on:
                 _settings.ShowChatComments = on;
@@ -633,6 +645,20 @@ public partial class MainWindow : Window
             case "unmark" when id is not null:
                 _history.Remove(id);
                 PostAll(new { type = "unmark", id }, except: pane);
+                break;
+        }
+    }
+
+    /// <summary>マウスジェスチャー（右ボタンを押したまま左右に動かす）で戻る・進む。</summary>
+    private static void HandleGesture(VideoPane pane, JsonElement message)
+    {
+        switch (GetString(message, "action"))
+        {
+            case "back" when pane.Core?.CanGoBack == true:
+                pane.Core.GoBack();
+                break;
+            case "forward" when pane.Core?.CanGoForward == true:
+                pane.Core.GoForward();
                 break;
         }
     }
@@ -734,8 +760,8 @@ public partial class MainWindow : Window
             e.Cancel = true;
             OpenExternal(target);
         }
-        // YouTube とログイン画面以外もアプリでは開かず、既定のブラウザに回す
-        else if (!YouTubeUrl.IsAllowedInApp(uri))
+        // YouTube とログイン画面以外もアプリでは開かず、既定のブラウザに回す（アプリ自身のページは別）
+        else if (!YouTubeUrl.IsAllowedInApp(uri) && !IsAppPage(uri))
         {
             e.Cancel = true;
             OpenExternal(e.Uri);
